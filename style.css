@@ -115,6 +115,27 @@ main { padding: 16px; }
   font-weight: 700;
 }
 
+.slot button.capture.secondary {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cropper {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  padding: 16px;
+}
+.cropper-box { background: #fff; border-radius: 12px; padding: 14px; max-width: 100%; }
+.cropper-guide { margin: 0 0 10px; font-weight: 600; }
+.cropper-stage { position: relative; display: inline-block; line-height: 0; cursor: crosshair; }
+.cropper-stage canvas { max-width: 100%; border: 1px solid var(--line); touch-action: none; }
+.cropper-marquee { position: absolute; border: 2px solid var(--accent); background: rgba(42, 120, 214, 0.15); pointer-events: none; }
+
 .thumb {
   width: 44px;
   height: 32px;

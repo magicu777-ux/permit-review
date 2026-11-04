@@ -68,12 +68,19 @@ function renderSlots() {
 
     // 작업허가서: Safe_b 화면을 캡처 도구로 찍어 바로 넣는다
     let captureButton = null;
+    let windowCaptureButton = null;
     if (kind === "permit") {
       captureButton = document.createElement("button");
       captureButton.type = "button";
       captureButton.className = "capture";
       captureButton.textContent = "📷 Safe_b 화면 캡처";
       captureButton.addEventListener("click", () => startCapture(kind));
+      // 캡처 도구가 막힌 PC용: 브라우저가 창을 직접 찍고, 필요한 영역을 잘라 넣는다
+      windowCaptureButton = document.createElement("button");
+      windowCaptureButton.type = "button";
+      windowCaptureButton.className = "capture secondary";
+      windowCaptureButton.textContent = "🖥 창 선택 캡처";
+      windowCaptureButton.addEventListener("click", () => startWindowCapture(kind));
     }
 
     const list = document.createElement("ul");
@@ -102,7 +109,7 @@ function renderSlots() {
       list.appendChild(item);
     });
 
-    slot.append(...[title, captureButton, pick, input, list].filter(Boolean));
+    slot.append(...[title, captureButton, windowCaptureButton, pick, input, list].filter(Boolean));
     ["dragenter", "dragover"].forEach((type) =>
       slot.addEventListener(type, (event) => {
         event.preventDefault();
@@ -134,7 +141,9 @@ function addFiles(kind, fileList) {
 // 버튼 → Windows 캡처 도구(ms-screenclip:) 실행 → 사용자가 영역을 드래그 → 클립보드에 들어온 그림을
 // 이 화면으로 돌아왔을 때 자동으로 가져온다. 클립보드 읽기를 막았으면 Ctrl+V로 붙여 넣으면 된다.
 const CAPTURE_WAIT_MS = 3 * 60 * 1000;
+const TOOL_OPEN_TIMEOUT_MS = 4000;
 let capture = null;
+let lastImportedSignature = null;
 
 async function clipboardImage() {
   const items = await navigator.clipboard.read();
@@ -163,32 +172,38 @@ function addCapture(kind, blob) {
   showStatus(`캡처한 화면을 작업허가서 칸에 넣었습니다(${files[kind].length}장). 더 캡처하거나 '검토하기'를 누르세요.`);
 }
 
-async function startCapture(kind) {
-  let baseline = null;
-  let clipboardBlocked = !navigator.clipboard || !navigator.clipboard.read;
-  if (!clipboardBlocked) {
-    try {
-      baseline = await blobSignature(await clipboardImage());
-    } catch (error) {
-      clipboardBlocked = error && error.name === "NotAllowedError";
-    }
-  }
-  capture = { kind, baseline, until: Date.now() + CAPTURE_WAIT_MS, clipboardBlocked };
+function startCapture(kind) {
+  // 버튼을 누른 그 순간에 바로 실행해야 브라우저가 막지 않는다(먼저 다른 확인 창을 띄우면 막힘)
+  // Windows 10·11 캡처 도구(Win+Shift+S와 같음). 브라우저가 '열기'를 물으면 허용한다.
+  window.location.href = "ms-screenclip:";
+  const clipboardBlocked = !navigator.clipboard || !navigator.clipboard.read;
+  capture = { kind, until: Date.now() + CAPTURE_WAIT_MS, clipboardBlocked, toolOpened: false, startedAt: Date.now() };
   showStatus(clipboardBlocked
     ? "캡처 도구에서 Safe_b의 작업허가서 영역을 드래그한 뒤, 이 화면에서 Ctrl+V를 누르세요."
     : "캡처 도구에서 Safe_b의 작업허가서 영역을 드래그하세요. 이 화면으로 돌아오면 자동으로 들어옵니다.");
-  // Windows 10·11 캡처 도구(Win+Shift+S와 같음). 브라우저가 '열기'를 물으면 허용한다.
-  window.location.href = "ms-screenclip:";
   if (!clipboardBlocked) waitForClipboard();
 }
+
+// 캡처 도구가 열리면 이 화면이 잠시 포커스를 잃는다 → 그 뒤에 들어온 클립보드 그림만 가져온다
+window.addEventListener("blur", () => {
+  if (capture) capture.toolOpened = true;
+});
 
 async function waitForClipboard() {
   while (capture && Date.now() < capture.until) {
     await new Promise((resolve) => setTimeout(resolve, 700));
-    if (!capture || !document.hasFocus()) continue; // 클립보드는 이 화면이 앞에 있을 때만 읽힌다
+    if (!capture) return;
+    if (!capture.toolOpened && Date.now() - capture.startedAt > TOOL_OPEN_TIMEOUT_MS) {
+      showStatus("캡처 도구가 열리지 않았습니다(회사 PC에서 막혀 있을 수 있음). Win+Shift+S로 캡처한 뒤 Ctrl+V를 누르거나, '🖥 창 선택 캡처'를 사용하세요.", true);
+      capture.clipboardBlocked = true;
+      return;
+    }
+    if (!capture.toolOpened || !document.hasFocus()) continue; // 클립보드는 이 화면이 앞에 있을 때만 읽힌다
     try {
       const blob = await clipboardImage();
-      if (blob && (await blobSignature(blob)) !== capture.baseline) {
+      const signature = await blobSignature(blob);
+      if (blob && signature !== lastImportedSignature) {
+        lastImportedSignature = signature;
         addCapture(capture.kind, blob);
         return;
       }
@@ -200,6 +215,103 @@ async function waitForClipboard() {
       }
     }
   }
+}
+
+// ── 창 선택 캡처(브라우저 화면 공유 기능) → 영역 자르기 ──
+async function startWindowCapture(kind) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+    showStatus("이 브라우저는 창 캡처를 지원하지 않습니다. 크롬·엣지 최신 버전에서 웹 주소로 열어 주세요.", true);
+    return;
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { cursor: "never" }, audio: false });
+  } catch (error) {
+    showStatus("창 선택을 취소했거나 브라우저가 허용하지 않았습니다.", true);
+    return;
+  }
+  try {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.srcObject = stream;
+    await video.play();
+    await new Promise((resolve) => setTimeout(resolve, 300)); // 첫 화면이 그려질 때까지 잠시 기다린다
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    openCropper(kind, canvas);
+  } finally {
+    stream.getTracks().forEach((track) => track.stop());
+  }
+}
+
+function openCropper(kind, source) {
+  const overlay = document.createElement("div");
+  overlay.className = "cropper";
+  const box = document.createElement("div");
+  box.className = "cropper-box";
+  const guide = cell("p", "작업허가서 부분을 마우스로 드래그해 고르세요. 고르지 않으면 화면 전체를 넣습니다.", "cropper-guide");
+  const stage = document.createElement("div");
+  stage.className = "cropper-stage";
+  const view = document.createElement("canvas");
+  const maxWidth = Math.min(window.innerWidth - 80, 1400);
+  const maxHeight = window.innerHeight - 200;
+  const ratio = Math.min(1, maxWidth / source.width, maxHeight / source.height);
+  view.width = Math.round(source.width * ratio);
+  view.height = Math.round(source.height * ratio);
+  view.getContext("2d").drawImage(source, 0, 0, view.width, view.height);
+  const marquee = document.createElement("div");
+  marquee.className = "cropper-marquee hidden";
+  stage.append(view, marquee);
+
+  let start = null;
+  let rect = null;
+  const point = (event) => {
+    const bounds = view.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(view.width, event.clientX - bounds.left)),
+      y: Math.max(0, Math.min(view.height, event.clientY - bounds.top)),
+    };
+  };
+  view.addEventListener("pointerdown", (event) => {
+    start = point(event);
+    view.setPointerCapture(event.pointerId);
+  });
+  view.addEventListener("pointermove", (event) => {
+    if (!start) return;
+    const p = point(event);
+    rect = { x: Math.min(start.x, p.x), y: Math.min(start.y, p.y), w: Math.abs(p.x - start.x), h: Math.abs(p.y - start.y) };
+    Object.assign(marquee.style, { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.w}px`, height: `${rect.h}px` });
+    marquee.classList.remove("hidden");
+  });
+  view.addEventListener("pointerup", () => { start = null; });
+
+  const close = () => overlay.remove();
+  const use = cell("button", "넣기", "primary");
+  use.type = "button";
+  use.addEventListener("click", () => {
+    const area = rect && rect.w > 10 && rect.h > 10
+      ? { x: rect.x / ratio, y: rect.y / ratio, w: rect.w / ratio, h: rect.h / ratio }
+      : { x: 0, y: 0, w: source.width, h: source.height };
+    const out = document.createElement("canvas");
+    out.width = Math.round(area.w);
+    out.height = Math.round(area.h);
+    out.getContext("2d").drawImage(source, area.x, area.y, area.w, area.h, 0, 0, out.width, out.height);
+    out.toBlob((blob) => {
+      close();
+      addCapture(kind, blob);
+    }, "image/png");
+  });
+  const cancel = cell("button", "취소");
+  cancel.type = "button";
+  cancel.addEventListener("click", close);
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  actions.append(use, cancel);
+  box.append(guide, stage, actions);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
 }
 
 // Ctrl+V: 캡처 중이면 그 칸에, 아니면 작업허가서 칸에 붙여 넣는다
