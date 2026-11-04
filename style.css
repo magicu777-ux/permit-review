@@ -105,6 +105,27 @@ main { padding: 16px; }
 
 .slot input[type="file"] { display: none; }
 
+.slot button.capture {
+  align-self: stretch;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 0;
+  background: var(--brand);
+  color: #fff;
+  font-weight: 700;
+}
+
+.thumb {
+  width: 44px;
+  height: 32px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  margin-right: 6px;
+  vertical-align: middle;
+  cursor: zoom-in;
+}
+
 .file-list { margin: 0; padding: 0; list-style: none; font-size: 13px; }
 .file-list li { display: flex; justify-content: space-between; gap: 6px; padding: 3px 0; border-top: 1px solid var(--line); }
 .file-list li span { word-break: break-all; }

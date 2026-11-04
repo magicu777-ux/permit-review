@@ -82,11 +82,114 @@ function readXlsx(arrayBuffer) {
 
 const IMAGE_FILE = /\.(jpe?g|png|gif|bmp|webp|heic)$/i;
 
-async function readDocument(file) {
+// ── 그림 속 글자 인식(OCR): Safe_b 화면 캡처, 자격증 사진 등 ──
+// tesseract.js를 lib/tesseract에 두고 브라우저 안에서만 인식한다(그림을 밖으로 보내지 않음).
+// 웹 주소(http/https)로 열었을 때 동작한다. 파일을 더블클릭해 연 화면(file://)에서는 브라우저가 막는다.
+let ocrWorkerPromise = null;
+let ocrProgress = null;
+
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    const base = new URL("lib/tesseract/", location.href).href;
+    ocrWorkerPromise = Tesseract.createWorker(["kor", "eng"], 1, {
+      workerPath: `${base}worker.min.js`,
+      corePath: `${base}core`,
+      langPath: `${base}lang`,
+      gzip: true,
+      logger: (message) => ocrProgress && ocrProgress(message),
+    }).catch((error) => {
+      ocrWorkerPromise = null;
+      throw error;
+    });
+  }
+  return ocrWorkerPromise;
+}
+
+// OCR은 '김 민 수'처럼 한 글자씩 띄우는 경우가 있어, 한 글자짜리가 이어지면 붙인다
+function joinSpacedSyllables(line) {
+  return line.replace(/(?:^|(?<=\s))([가-힣])(?:\s([가-힣]))+(?=\s|$)/g, (match) => match.replace(/\s/g, ""));
+}
+
+// 화면 캡처는 글자가 작아(14px 안팎) 그대로는 한글을 거의 못 읽는다 → 2~3배 키우고 흑백으로 바꿔 인식한다
+const OCR_TARGET_WIDTH = 2400;
+
+async function prepareForOcr(file) {
+  const bitmap = await createImageBitmap(file);
+  const scale = Math.min(3, Math.max(1, OCR_TARGET_WIDTH / bitmap.width));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(bitmap.width * scale);
+  canvas.height = Math.round(bitmap.height * scale);
+  const context = canvas.getContext("2d");
+  context.imageSmoothingQuality = "high";
+  context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  const px = image.data;
+  const { width, height } = canvas;
+  // 흑백 두 값으로 나눈다(true = 검은 점)
+  const dark = new Uint8Array(width * height);
+  for (let i = 0, p = 0; i < px.length; i += 4, p += 1) {
+    dark[p] = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2] < 165 ? 1 : 0;
+  }
+  // 표 테두리처럼 가로·세로로 길게 이어진 선은 지운다(남겨 두면 표 전체를 글자로 잘못 읽는다)
+  const maxRun = Math.round(40 * scale);
+  const erase = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    let start = -1;
+    for (let x = 0; x <= width; x += 1) {
+      const on = x < width && dark[y * width + x];
+      if (on && start < 0) start = x;
+      if (!on && start >= 0) {
+        if (x - start > maxRun) for (let k = start; k < x; k += 1) erase[y * width + k] = 1;
+        start = -1;
+      }
+    }
+  }
+  for (let x = 0; x < width; x += 1) {
+    let start = -1;
+    for (let y = 0; y <= height; y += 1) {
+      const on = y < height && dark[y * width + x];
+      if (on && start < 0) start = y;
+      if (!on && start >= 0) {
+        if (y - start > maxRun) for (let k = start; k < y; k += 1) erase[k * width + x] = 1;
+        start = -1;
+      }
+    }
+  }
+  for (let p = 0; p < dark.length; p += 1) {
+    const value = dark[p] && !erase[p] ? 0 : 255;
+    px[p * 4] = px[p * 4 + 1] = px[p * 4 + 2] = value;
+    px[p * 4 + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
+  return canvas;
+}
+
+async function ocrImage(file, onProgress) {
+  ocrProgress = onProgress;
+  try {
+    const worker = await getOcrWorker();
+    const { data } = await worker.recognize(await prepareForOcr(file));
+    return data.text.split("\n").map((line) => joinSpacedSyllables(line.replace(/\s+/g, " ").trim())).filter(Boolean);
+  } finally {
+    ocrProgress = null;
+  }
+}
+
+async function readDocument(file, options = {}) {
   const name = file.name;
   let part;
   if (IMAGE_FILE.test(name)) {
     part = { lines: [], pages: [], tables: [], images: 1 };
+    if (options.ocr) {
+      try {
+        part.lines = await ocrImage(file, options.onProgress);
+        part.ocr = true;
+      } catch (error) {
+        throw new Error(location.protocol === "file:"
+          ? "그림 글자 인식은 웹 주소로 열었을 때만 됩니다(파일로 연 화면에서는 브라우저가 막음)."
+          : `그림 글자 인식에 실패했습니다(${error.message || error}).`);
+      }
+    }
   } else {
     const buffer = await file.arrayBuffer();
     if (/\.pdf$/i.test(name)) part = await readPdf(buffer);

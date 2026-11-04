@@ -152,6 +152,39 @@ LICENSE_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{S
 </body></html>"""
 
 
+PERMIT_SCREEN_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{STYLE}
+<style>body{{background:#fff;font-size:15px}} .bar{{background:#1f4f8f;color:#fff;padding:8px 12px;font-weight:bold}}</style></head><body>
+<div class="bar">안전보건시스템 — 작업허가서 조회 (샘플 화면·가상)</div>
+<table>
+<tr><th>작업명</th><td>통신맨홀 내부 광케이블 접속 및 전주 인입선 정리 작업</td></tr>
+<tr><th>작업장소</th><td>○○시 ○○구 ○○로 통신맨홀 M-123 및 인근 전주 #45</td></tr>
+<tr><th>작업일시</th><td>2026-11-10 09:00 ~ 18:00</td></tr>
+<tr><th>허가 작업 구분</th><td>밀폐공간 작업(맨홀), 고소작업(전주, 고소작업차(스카이))</td></tr>
+<tr><th>작업책임자</th><td>김민수</td></tr>
+</table>
+<table><tr><th>순번</th><th>성명</th><th>직종</th></tr>
+{''.join(f'<tr><td>{i + 1}</td><td>{n}</td><td>통신공</td></tr>' for i, n in enumerate(WORKERS))}
+</table></body></html>"""
+
+
+def html_to_png(html_text, png_name, size='900,620'):
+    """Safe_b 화면 캡처를 흉내 낸 그림(글자 인식 시험용)."""
+    chrome = next(p for p in CHROME_CANDIDATES if os.path.exists(p))
+    work = tempfile.mkdtemp()
+    try:
+        page = os.path.join(work, 'page.html')
+        with open(page, 'w', encoding='utf-8') as f:
+            f.write(html_text)
+        out = os.path.join(work, 'out.png')
+        subprocess.run([chrome, '--headless=new', '--disable-gpu', '--hide-scrollbars', '--virtual-time-budget=3000',
+                        f'--window-size={size}', f'--user-data-dir={os.path.join(work, "profile")}', f'--screenshot={out}',
+                        'file:///' + page.replace('\\', '/')],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+        shutil.copyfile(out, os.path.join(HERE, png_name))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def html_to_pdf(html_text, pdf_name):
     chrome = next(p for p in CHROME_CANDIDATES if os.path.exists(p))
     work = tempfile.mkdtemp()
@@ -175,6 +208,7 @@ if __name__ == '__main__':
     if os.path.exists(old):
         os.remove(old)
     make_permit()
+    html_to_png(PERMIT_SCREEN_HTML, '작업허가서_캡처_샘플.png')
     make_risk()
     html_to_pdf(PLAN_HTML, '작업계획서_샘플.pdf')
     html_to_pdf(EDU_HTML, '특별안전교육_밀폐공간_샘플.pdf')
