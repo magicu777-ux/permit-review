@@ -1,0 +1,4 @@
+lib/** -text
+*.png binary
+*.pdf binary
+*.xlsx binary
