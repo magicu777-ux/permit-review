@@ -5,7 +5,8 @@
 #   - 작업계획서: 밀폐공간 감시인, 신호수 지정 없음
 #   - 특별교육: 일용근로자 2시간인데 채용 시 교육 1시간 서류 없음, 이수자 명단에서 최도윤 빠짐
 #   - 위험성평가: 참여자 명단에서 최도윤 빠짐
-# 사용법: python make_samples.py   (엑셀은 openpyxl, PDF는 Chrome/Edge 인쇄로 만든다)
+#   - 작업허가서(Safe_B 화면): 관리팀 미입력
+# 사용법: python make_samples.py   (엑셀은 openpyxl, PDF·그림은 Chrome/Edge로 만든다)
 # =========================================================
 
 import os
@@ -87,10 +88,12 @@ def make_risk():
     wb.save(os.path.join(HERE, '위험성평가_샘플.xlsx'))
 
 
+# 작업계획서: 1쪽은 회사 '차량계 하역운반기계 작업계획서' 양식(장비 체크), 이어서 본문, 끝에 작업지휘자 지정서
 PLAN_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{STYLE}</head><body>
-<h1>작업계획서 (샘플·가상)</h1>
+<h1>차량계 하역운반기계 작업계획서 (샘플·가상)</h1>
 <table>
 <tr><th>작업명</th><td>통신맨홀 내부 광케이블 접속 및 전주 인입선 정리 작업</td></tr>
+<tr><th>사용 장비</th><td>☑ 고소작업차·스카이 차량 작업 &nbsp; ☐ 고소작업대·리프트카 작업 &nbsp; ☐ 크레인 작업 &nbsp; ☐ 지게차 작업 &nbsp; ☐ 덤프트럭</td></tr>
 <tr><th>작업장소</th><td>○○시 ○○구 ○○로 통신맨홀 M-123, 전주 #45</td></tr>
 <tr><th>작업기간</th><td>2026-11-10 ~ 2026-11-11</td></tr>
 <tr><th>투입 인원</th><td>4명 (김민수, 이준호, 박서연, 최도윤)</td></tr>
@@ -152,22 +155,56 @@ LICENSE_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{S
 </body></html>"""
 
 
-PERMIT_SCREEN_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{STYLE}
-<style>body{{background:#fff;font-size:15px}} .bar{{background:#1f4f8f;color:#fff;padding:8px 12px;font-weight:bold}}</style></head><body>
+def radio(selected_no):
+    """Safe_B의 예/아니오 라디오 버튼 모양."""
+    on, off = '●', '○'
+    return f"{off if selected_no else on} 예 &nbsp; {on if selected_no else off} 아니오"
+
+
+def check(on, label):
+    return f"{'☑' if on else '☐'} {label}"
+
+
+CATEGORIES = [['화기작업', '고소작업(3.5m 이상)', '가시설물 설치', '가시설물 해체', '전기작업'],
+              ['건설기계(덤프트럭)', '건설기계(굴착기)', '고소작업대(차량형)', '고소작업대(시저형)', '이동식 크레인', '지게차']]
+
+
+def permit_screen_html(selected, fields, workers, high_risk_no=True, urgent_no=True):
+    """Safe_B 작업허가서 화면을 흉내 낸 그림용 HTML(글자 인식 시험용)."""
+    categories = '<br>'.join(' &nbsp; '.join(check(name in selected, name) for name in row) for row in CATEGORIES)
+    f = fields
+    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{STYLE}
+<style>body{{background:#fff;font-size:15px}} .bar{{background:#1f4f8f;color:#fff;padding:8px 12px;font-weight:bold}}
+th{{width:150px}}</style></head><body>
 <div class="bar">안전보건시스템 — 작업허가서 조회 (샘플 화면·가상)</div>
 <table>
-<tr><th>작업명</th><td>통신맨홀 내부 광케이블 접속 및 전주 인입선 정리 작업</td></tr>
-<tr><th>작업장소</th><td>○○시 ○○구 ○○로 통신맨홀 M-123 및 인근 전주 #45</td></tr>
-<tr><th>작업일시</th><td>2026-11-10 09:00 ~ 18:00</td></tr>
-<tr><th>허가 작업 구분</th><td>밀폐공간 작업(맨홀), 고소작업(전주, 고소작업차(스카이))</td></tr>
-<tr><th>작업책임자</th><td>김민수</td></tr>
+<tr><th>작업명</th><td colspan="3">{f['작업명']}</td></tr>
+<tr><th>작업시작</th><td>{f['작업시작']}</td><th>작업종료</th><td>{f['작업종료']}</td></tr>
+<tr><th>사업구분</th><td>{f['사업구분']}</td><th>관리팀</th><td>{f['관리팀']}</td></tr>
+<tr><th>도급사</th><td colspan="3">{f['도급사']}</td></tr>
+<tr><th>작업장소 구분</th><td>{f['작업장소 구분']}</td><th>작업장소(사옥)</th><td>{f['작업장소(사옥)']}</td></tr>
+<tr><th>작업장소(세부)</th><td colspan="3">{f['작업장소(세부)']}</td></tr>
+<tr><th>High Risk</th><td>{radio(high_risk_no)}</td><th>긴급작업 여부</th><td>{radio(urgent_no)}</td></tr>
+<tr><th>작업구분</th><td colspan="3">{categories}</td></tr>
+<tr><th>작업내용</th><td colspan="3">{f['작업내용']}</td></tr>
+<tr><th>작업책임자</th><td>{f['작업책임자']}</td><th>작업인원</th><td>{f['작업인원']}</td></tr>
 </table>
 <table><tr><th>순번</th><th>성명</th><th>직종</th></tr>
-{''.join(f'<tr><td>{i + 1}</td><td>{n}</td><td>통신공</td></tr>' for i, n in enumerate(WORKERS))}
+{''.join(f'<tr><td>{i + 1}</td><td>{n}</td><td>통신공</td></tr>' for i, n in enumerate(workers))}
 </table></body></html>"""
 
 
-def html_to_png(html_text, png_name, size='900,620'):
+# 장면 1의 Safe_B 화면: 관리팀은 일부러 비워 둔다
+PERMIT_SCREEN_HTML = permit_screen_html(
+    {'고소작업(3.5m 이상)', '고소작업대(차량형)'},
+    {'작업명': '통신맨홀 내부 광케이블 접속 및 전주 인입선 정리 작업', '작업시작': '2026-11-10 09:00', '작업종료': '2026-11-10 18:00',
+     '사업구분': '유선미디어', '관리팀': '', '도급사': '(가상) 한빛통신', '작업장소 구분': '옥외', '작업장소(사옥)': '○○사옥',
+     '작업장소(세부)': '○○로 통신맨홀 M-123 및 인근 전주 #45', '작업내용': '맨홀 내부 광케이블 접속, 고소작업차로 전주 인입선 정리',
+     '작업책임자': '김민수', '작업인원': '4명'},
+    WORKERS)
+
+
+def html_to_png(html_text, png_name, size='1000,760'):
     """Safe_b 화면 캡처를 흉내 낸 그림(글자 인식 시험용)."""
     chrome = next(p for p in CHROME_CANDIDATES if os.path.exists(p))
     work = tempfile.mkdtemp()
@@ -213,4 +250,4 @@ if __name__ == '__main__':
     html_to_pdf(PLAN_HTML, '작업계획서_샘플.pdf')
     html_to_pdf(EDU_HTML, '특별안전교육_밀폐공간_샘플.pdf')
     html_to_pdf(LICENSE_HTML, '고소작업대_조종교육_이수증_샘플.pdf')
-    print('샘플 생성:', ', '.join(sorted(n for n in os.listdir(HERE) if n.endswith(('.xlsx', '.pdf')))))
+    print('샘플 생성:', ', '.join(sorted(n for n in os.listdir(HERE) if n.endswith(('.xlsx', '.pdf', '.png')))))

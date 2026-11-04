@@ -53,7 +53,10 @@ async function readPdf(arrayBuffer) {
       if (group) group.push(piece);
       else groups.push([piece]);
     });
-    groups.filter((g) => g.length > 1).forEach((g) => lines.push(g.map((p) => p.text).join("")));
+    // 좁은 머리글 칸('투입 인 / 원')만 잇는다: 긴 본문이나 ☑·☐ 표시가 섞이면 엉뚱한 글자가 붙으므로 제외
+    groups
+      .filter((g) => g.length > 1 && g.every((p) => p.text.length <= 12 && !/[☑☒■▣●◉✔✓✅☐□○◯]/.test(p.text)))
+      .forEach((g) => lines.push(g.map((p) => p.text).join("")));
     // 사진(이미지) 개수: 교육 증빙사진 확인용
     const ops = await page.getOperatorList();
     const imageOps = IMAGE_OPS();
@@ -322,33 +325,256 @@ async function prepareForOcr(file) {
     }
   }
   for (let p = 0; p < dark.length; p += 1) {
-    const value = dark[p] && !erase[p] ? 0 : 255;
+    dark[p] = dark[p] && !erase[p] ? 1 : 0;
+    const value = dark[p] ? 0 : 255;
     px[p * 4] = px[p * 4 + 1] = px[p * 4 + 2] = value;
     px[p * 4 + 3] = 255;
   }
   context.putImageData(image, 0, 0);
-  return canvas;
+  return { canvas, dark, width, height };
+}
+
+// ── 그림 속 체크박스·라디오 버튼 ──
+// 글자 인식은 ☑/☐, ●/○를 제대로 읽지 못하고 'ㅁ', '00', '10', '@' 같은 짧은 엉뚱한 단어로 읽는다.
+// 그런 단어를 '선택 표시'로 보고, 그 상자 안이 얼마나 검게 채워졌는지(채움 비율)로 선택 여부를 판단한다.
+// 테두리는 둘 다 있으므로 표시의 '가운데'만 본다: ☐·○는 가운데가 비어 있고, ☑·●·(체크된) 파란 체크박스는 차 있다.
+// 판단은 같은 묶음(작업구분 칸들, 예/아니오 한 쌍)끼리 비교해서 한다.
+const MARKER_WORD = /^(10|[ㅁㅇ口0Oo@©®◎●○☐☑☒■□▣◉✓✔vVxX[\]]{1,3})$/;
+const MARKER_CENTER = 0.3; // 상자 가장자리에서 30%씩 안쪽
+
+// 글자 인식이 준 상자는 표시보다 길쭉하거나 어긋나므로, 그 근처에서 글자 크기(size)만 한 네모·동그라미 덩어리 중
+// 인식 상자 가운데에 가장 가까운 것을 표시의 실제 테두리로 본다
+// 영역 안의 '이어진 검은 점 덩어리'마다 테두리 상자를 돌려준다
+function inkComponents(image, region) {
+  const { dark, width, height } = image;
+  const x0 = Math.max(0, Math.floor(region.x0));
+  const x1 = Math.min(width - 1, Math.ceil(region.x1));
+  const y0 = Math.max(0, Math.floor(region.y0));
+  const y1 = Math.min(height - 1, Math.ceil(region.y1));
+  const regionWidth = x1 - x0 + 1;
+  const seen = new Uint8Array(regionWidth * (y1 - y0 + 1));
+  const components = [];
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) {
+      const local = (y - y0) * regionWidth + (x - x0);
+      if (seen[local] || !dark[y * width + x]) continue;
+      let bx0 = x, bx1 = x, by0 = y, by1 = y;
+      const stack = [[x, y]];
+      seen[local] = 1;
+      while (stack.length) {
+        const [cx, cy] = stack.pop();
+        if (cx < bx0) bx0 = cx;
+        if (cx > bx1) bx1 = cx;
+        if (cy < by0) by0 = cy;
+        if (cy > by1) by1 = cy;
+        for (const [nx, ny] of [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]]) {
+          if (nx < x0 || nx > x1 || ny < y0 || ny > y1) continue;
+          const nLocal = (ny - y0) * regionWidth + (nx - x0);
+          if (!seen[nLocal] && dark[ny * width + nx]) {
+            seen[nLocal] = 1;
+            stack.push([nx, ny]);
+          }
+        }
+      }
+      components.push({ x0: bx0, x1: bx1, y0: by0, y1: by1 });
+    }
+  }
+  return components;
+}
+
+function markerShaped(box, size) {
+  const w = box.x1 - box.x0 + 1;
+  const h = box.y1 - box.y0 + 1;
+  return w >= size * 0.5 && h >= size * 0.5 && w <= size * 1.4 && h <= size * 1.4 && w / h >= 0.7 && w / h <= 1.45;
+}
+
+function markerOutline(image, bbox, size) {
+  const pad = size * 0.6;
+  const cx = (bbox.x0 + bbox.x1) / 2;
+  const cy = (bbox.y0 + bbox.y1) / 2;
+  const candidates = inkComponents(image, { x0: bbox.x0 - pad, x1: bbox.x1 + pad, y0: bbox.y0 - pad, y1: bbox.y1 + pad })
+    .filter((box) => markerShaped(box, size));
+  let best = null;
+  let bestDistance = Infinity;
+  candidates.forEach((box) => {
+    const distance = Math.hypot((box.x0 + box.x1) / 2 - cx, (box.y0 + box.y1) / 2 - cy);
+    if (distance < bestDistance) {
+      best = box;
+      bestDistance = distance;
+    }
+  });
+  return best || bbox;
+}
+
+function boxDensity(image, box) {
+  const { dark, width } = image;
+  let ink = 0;
+  for (let y = box.y0; y <= box.y1; y += 1) for (let x = box.x0; x <= box.x1; x += 1) ink += dark[y * width + x];
+  return ink / ((box.x1 - box.x0 + 1) * (box.y1 - box.y0 + 1));
+}
+
+// 네 변이 모두 검은 네모 테두리인지(체크박스): 안에 체크가 있든 없든 테두리로 알아본다
+function isSquareFrame(image, box) {
+  const { dark, width } = image;
+  const band = Math.max(1, Math.round((box.x1 - box.x0) * 0.12));
+  const edgeInk = (x0, x1, y0, y1) => {
+    let ink = 0;
+    let total = 0;
+    for (let y = y0; y <= y1; y += 1) {
+      for (let x = x0; x <= x1; x += 1) {
+        total += 1;
+        ink += dark[y * width + x];
+      }
+    }
+    return ink / total;
+  };
+  // 각 변 띠(두께 band)에서, 그 줄에 검은 점이 하나라도 있는 비율
+  const rowCovered = (y0, y1) => {
+    let covered = 0;
+    for (let x = box.x0; x <= box.x1; x += 1) {
+      let any = 0;
+      for (let y = y0; y <= y1; y += 1) any |= dark[y * width + x];
+      covered += any;
+    }
+    return covered / (box.x1 - box.x0 + 1);
+  };
+  const colCovered = (x0, x1) => {
+    let covered = 0;
+    for (let y = box.y0; y <= box.y1; y += 1) {
+      let any = 0;
+      for (let x = x0; x <= x1; x += 1) any |= dark[y * width + x];
+      covered += any;
+    }
+    return covered / (box.y1 - box.y0 + 1);
+  };
+  return rowCovered(box.y0, box.y0 + band) > 0.85 && rowCovered(box.y1 - band, box.y1) > 0.85
+    && colCovered(box.x0, box.x0 + band) > 0.85 && colCovered(box.x1 - band, box.x1) > 0.85
+    && edgeInk(box.x0 + band + 1, box.x1 - band - 1, box.y0 + band + 1, box.y1 - band - 1) < 0.6;
+}
+
+// 글자 인식이 아예 단어로 잡지 못한 표시도 찾는다: 글자 크기만 한 체크박스 테두리, 빈 동그라미, 꽉 찬 점
+function scanMarkers(image, lineBox, size) {
+  return inkComponents(image, { x0: lineBox.x0 - size * 2, x1: lineBox.x1 + size, y0: lineBox.y0 - size * 0.3, y1: lineBox.y1 + size * 0.3 })
+    .filter((box) => {
+      const w = box.x1 - box.x0 + 1;
+      const h = box.y1 - box.y0 + 1;
+      if (w < size * 0.7 || h < size * 0.7 || w > size * 1.3 || h > size * 1.3 || w / h < 0.8 || w / h > 1.25) return false;
+      const whole = boxDensity(image, box);
+      const center = inkDensity(image, box, size, true);
+      return whole > 0.75 || (center < 0.03 && whole > 0.12 && whole < 0.6) || isSquareFrame(image, box);
+    });
+}
+
+function inkDensity(image, wordBox, size, exact = false) {
+  const { dark, width, height } = image;
+  const bbox = exact ? wordBox : markerOutline(image, wordBox, size);
+  const insetX = (bbox.x1 - bbox.x0) * MARKER_CENTER;
+  const insetY = (bbox.y1 - bbox.y0) * MARKER_CENTER;
+  const x0 = Math.max(0, Math.floor(bbox.x0 + insetX));
+  const x1 = Math.min(width - 1, Math.ceil(bbox.x1 - insetX));
+  const y0 = Math.max(0, Math.floor(bbox.y0 + insetY));
+  const y1 = Math.min(height - 1, Math.ceil(bbox.y1 - insetY));
+  let ink = 0;
+  for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) ink += dark[y * width + x];
+  return ink / Math.max(1, (x1 - x0 + 1) * (y1 - y0 + 1));
 }
 
 async function ocrImage(file, onProgress) {
   ocrProgress = onProgress;
   try {
     const worker = await getOcrWorker();
-    const { data } = await worker.recognize(await prepareForOcr(file));
-    return data.text.split("\n").map((line) => joinSpacedSyllables(line.replace(/\s+/g, " ").trim())).filter(Boolean);
+    const image = await prepareForOcr(file);
+    const { data } = await worker.recognize(image.canvas, {}, { blocks: true, text: true });
+    const lines = [];
+    const options = [];
+    (data.blocks || []).forEach((block) => block.paragraphs.forEach((paragraph) => paragraph.lines.forEach((ocrLine) => {
+      const words = ocrLine.words.filter((w) => w.text.trim());
+      if (!words.length) return;
+      // 줄 글자를 만들면서 단어마다 글자 위치를 기억한다(선택지가 어느 항목 뒤에 있는지 찾는 데 씀)
+      // 한 글자씩 띄워 읽힌 한글('긴 급 작 업')은 붙여서 만든다(위치가 어긋나지 않도록 여기서 바로)
+      let text = "";
+      const single = (w) => /^[가-힣]$/.test(w.text.trim());
+      words.forEach((word, i) => {
+        const separator = !text ? "" : (single(word) && single(words[i - 1]) ? "" : " ");
+        word.offset = text.length + separator.length;
+        text = `${text}${separator}${word.text.trim()}`;
+      });
+      // 선택 표시로 읽힌 짧은 단어 → 그 뒤 ~ 다음 표시 앞까지의 단어가 선택지 글자
+      const markerIndexes = words.map((w, i) => (MARKER_WORD.test(w.text.trim()) ? i : -1)).filter((i) => i >= 0);
+      // 이 줄의 보통 글자 높이(표시 단어는 상자가 길쭉하게 나와 빼고 잰다)
+      const textHeights = words.filter((w) => !MARKER_WORD.test(w.text.trim())).map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
+      const size = textHeights.length ? textHeights[Math.floor(textHeights.length / 2)] : 30;
+      // 표시 위치: 표시로 읽힌 단어의 실제 테두리 + 단어로 잡히지 않은 표시(겹치면 하나로)
+      const overlaps = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
+      const markers = markerIndexes.map((i) => markerOutline(image, words[i].bbox, size));
+      scanMarkers(image, ocrLine.bbox, size).forEach((box) => {
+        if (!markers.some((m) => overlaps(m, box))) markers.push(box);
+      });
+      markers.sort((a, b) => a.x0 - b.x0);
+      const isMarkerWord = (w) => MARKER_WORD.test(w.text.trim()) || markers.some((m) => overlaps(m, w.bbox));
+      markers.forEach((marker, n) => {
+        const nextX = n + 1 < markers.length ? markers[n + 1].x0 : Infinity;
+        const following = words.filter((w) => !isMarkerWord(w) && w.bbox.x0 >= marker.x1 - size * 0.3 && w.bbox.x0 < nextX);
+        // 글자 인식이 표시와 옆 글자를 한 단어('[cd')로 묶어 버리면 선택지 글자가 없다 → 위치만 남긴다(예/아니오는 순서로 판단)
+        const anchor = following[0] || words.find((w) => overlaps(marker, w.bbox) || w.bbox.x0 >= marker.x0);
+        if (!anchor) return;
+        options.push({
+          text: text.slice(anchor.offset, following.length ? following[following.length - 1].offset + following[following.length - 1].text.trim().length : anchor.offset),
+          textIndex: anchor.offset,
+          density: Math.round(inkDensity(image, marker, size, true) * 100) / 100,
+          filled: null,
+          lineText: text,
+          page: 0,
+        });
+      });
+      lines.push(text);
+    })));
+    return { lines: lines.filter(Boolean), options };
   } finally {
     ocrProgress = null;
   }
+}
+
+// PDF·Word·엑셀처럼 글자로 된 서류의 ☑/☐, ●/○ 선택지
+const FILLED_MARKS = "☑☒■▣●◉✔✓✅";
+const EMPTY_MARKS = "☐□○◯";
+
+function textOptions(lines, page = 0) {
+  const marks = FILLED_MARKS + EMPTY_MARKS;
+  const pattern = new RegExp(`([${marks}])\\s*([^${marks}]+)`, "g");
+  const options = [];
+  lines.forEach((line, index) => {
+    for (const m of line.matchAll(pattern)) {
+      options.push({ text: m[2].trim(), textIndex: m.index + m[0].indexOf(m[2]), density: null,
+        filled: FILLED_MARKS.includes(m[1]), lineText: line, page });
+    }
+    // 줄 끝에 표시만 있고 글자는 다음 줄로 넘어간 경우('… ☐' / '지게차 작업 ☐ 덤프트럭')
+    const trailing = line.match(new RegExp(`([${marks}])\\s*$`));
+    if (trailing && index + 1 < lines.length) {
+      const next = lines[index + 1].split(new RegExp(`[${marks}]`))[0].trim();
+      if (next) options.push({ text: next, textIndex: trailing.index, density: null, filled: FILLED_MARKS.includes(trailing[1]), lineText: line, page });
+    }
+  });
+  return options;
+}
+
+// 체크하지 않은 선택지(☐ 지게차 작업 등)의 글자를 뺀 줄: 장비·작업 찾기에 쓴다
+function activeLines(doc) {
+  const unchecked = (doc.options || []).filter((o) => o.filled === false && o.text);
+  if (!unchecked.length) return doc.lines;
+  return doc.lines.map((line) => unchecked.filter((o) => line.includes(o.text)).reduce((l, o) => l.replace(o.text, " "), line));
 }
 
 async function readDocument(file, options = {}) {
   const name = file.name;
   let part;
   if (IMAGE_FILE.test(name)) {
-    part = { lines: [], pages: [], tables: [], images: 1 };
+    part = { lines: [], pages: [], tables: [], images: 1, options: [] };
     if (options.ocr) {
       try {
-        part.lines = await ocrImage(file, options.onProgress);
+        const ocr = await ocrImage(file, options.onProgress);
+        part.lines = ocr.lines;
+        part.options = ocr.options;
         part.ocr = true;
       } catch (error) {
         throw new Error(location.protocol === "file:"
@@ -364,6 +590,9 @@ async function readDocument(file, options = {}) {
     else if (/\.pptx$/i.test(name)) part = readPptx(buffer);
     else if (/\.(doc|ppt)$/i.test(name)) throw new Error("옛 형식(.doc·.ppt)은 읽을 수 없습니다. Word·PowerPoint에서 docx·pptx 또는 PDF로 다시 저장해 주세요.");
     else throw new Error("PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진 파일만 읽을 수 있습니다.");
+    part.options = part.pages.length
+      ? part.pages.flatMap((page, index) => textOptions(page.lines, index))
+      : textOptions(part.lines);
   }
   // 파일 이름(압축 안 폴더 포함)도 단서로 쓴다(예: '지게차운전기능사_홍길동.jpg', '화기감시자_지정서.pdf')
   const displayName = file.origin ? `${file.origin} › ${file.zipPath || name}` : name;
@@ -517,7 +746,7 @@ function analyzeDocument(kind, parts) {
   const files = parts.map(analyzePart);
   const lines = files.flatMap((f) => f.lines);
   const doc = analyzePart({ lines, pages: files.flatMap((f) => f.pages), tables: files.flatMap((f) => f.tables),
-    images: files.reduce((sum, f) => sum + f.images, 0) });
+    images: files.reduce((sum, f) => sum + f.images, 0), options: files.flatMap((f) => f.options || []) });
   return { ...doc, kind, files };
 }
 
@@ -566,9 +795,18 @@ function reviewDocuments(docs) {
   const { permit, plan, risk, education, attachments } = docs;
   const workDocs = [permit, plan].filter(Boolean);
   const workText = workDocs.map((d) => d.text).join("\n");
-  const workLines = workDocs.flatMap((d) => d.lines);
   // 작업 종류는 허가서 기준(없으면 계획서). 계획서의 안전대책 문장 속 단어로 작업을 늘리지 않는다.
-  const workTypes = detectWorkTypes((permit || plan || { lines: [] }).lines);
+  // Safe_B 작업구분 칸은 고르지 않은 작업도 화면에 다 적혀 있으므로, 그 줄은 빼고 '선택된' 작업구분만 더한다.
+  // 계획서의 체크하지 않은 장비(☐ 지게차 작업 등)도 장비 찾기에서 뺀다.
+  const form = permit ? readPermitForm(permit) : null;
+  const permitLines = permit ? permit.lines.filter((line) => !form.categoryLines.has(line)) : [];
+  const workLines = [...permitLines, ...(plan ? activeLines(plan) : [])];
+  const workTypes = (() => {
+    if (!form) return detectWorkTypes(plan ? activeLines(plan) : []);
+    const detected = detectWorkTypes(permitLines);
+    const ids = new Set([...detected.map((t) => t.id), ...permitWorkTypeIds(form)]);
+    return rules.workTypes.filter((t) => ids.has(t.id));
+  })();
   const has = (id) => workTypes.some((t) => t.id === id);
   // 자격서류·지정서·도면은 계획서뿐 아니라 허가서·기타 첨부에 따로 붙어 올 수 있다
   const evidenceDocs = [attachments, plan, permit].filter(Boolean);
@@ -602,6 +840,9 @@ function reviewDocuments(docs) {
     add(S1, DOC_KINDS.education, "특별안전교육", education ? "ok" : "info", education ? "파일을 읽었습니다." : "특별교육 대상 작업이 확인되지 않았습니다.");
   }
   if (attachments) add(S1, DOC_KINDS.attachments, "기타 첨부", "info", formatList(attachments.files.map((f) => f.fileName)));
+
+  // 작업허가서(Safe_B) 칸 점검
+  if (form) reviewPermitForm(form, docs, add);
 
   // 2) 작업 정보
   const S2 = "작업 정보";

@@ -15,7 +15,7 @@ const IMAGE_SLOTS = ["permit", "plan", "risk", "education", "attachments"];
 const OCR_SLOTS = ["permit", "plan", "risk", "attachments"];
 const IMAGE_NAME = /\.(jpe?g|png|gif|bmp|webp|heic)$/i;
 const STATUS_LABEL = { ok: "적합", warn: "확인 필요", fail: "미흡", manual: "직접 확인", info: "참고" };
-const SECTION_ORDER = ["제출 서류", "작업 정보", "작업계획서", "화기 작업", "위험성평가", "특별안전교육", "서류 간 일치"];
+const SECTION_ORDER = ["제출 서류", "작업허가서(Safe_B)", "작업 정보", "작업계획서", "화기 작업", "위험성평가", "특별안전교육", "서류 간 일치"];
 
 // 샘플(가상 서류) — samples 폴더
 const SAMPLE_FILES = {
@@ -70,19 +70,13 @@ function renderSlots() {
     pick.textContent = "파일 선택 또는 끌어 놓기";
 
     // 작업허가서: Safe_b 화면을 캡처 도구로 찍어 바로 넣는다
-    let captureButton = null;
+    // 작업허가서: 브라우저가 Safe_B 창을 직접 찍고, 필요한 영역을 잘라 넣는다(Ctrl+V 붙여넣기도 됨)
     let windowCaptureButton = null;
     if (kind === "permit") {
-      captureButton = document.createElement("button");
-      captureButton.type = "button";
-      captureButton.className = "capture";
-      captureButton.textContent = "📷 Safe_b 화면 캡처";
-      captureButton.addEventListener("click", () => startCapture(kind));
-      // 캡처 도구가 막힌 PC용: 브라우저가 창을 직접 찍고, 필요한 영역을 잘라 넣는다
       windowCaptureButton = document.createElement("button");
       windowCaptureButton.type = "button";
-      windowCaptureButton.className = "capture secondary";
-      windowCaptureButton.textContent = "🖥 창 선택 캡처";
+      windowCaptureButton.className = "capture";
+      windowCaptureButton.textContent = "🖥 Safe_B 창 선택 캡처";
       windowCaptureButton.addEventListener("click", () => startWindowCapture(kind));
     }
 
@@ -112,7 +106,7 @@ function renderSlots() {
       list.appendChild(item);
     });
 
-    slot.append(...[title, captureButton, windowCaptureButton, pick, input, list].filter(Boolean));
+    slot.append(...[title, windowCaptureButton, pick, input, list].filter(Boolean));
     ["dragenter", "dragover"].forEach((type) =>
       slot.addEventListener(type, (event) => {
         event.preventDefault();
@@ -162,84 +156,14 @@ async function addFiles(kind, fileList) {
   }
 }
 
-// ── Safe_b 화면 캡처 ──
-// 버튼 → Windows 캡처 도구(ms-screenclip:) 실행 → 사용자가 영역을 드래그 → 클립보드에 들어온 그림을
-// 이 화면으로 돌아왔을 때 자동으로 가져온다. 클립보드 읽기를 막았으면 Ctrl+V로 붙여 넣으면 된다.
-const CAPTURE_WAIT_MS = 3 * 60 * 1000;
-const TOOL_OPEN_TIMEOUT_MS = 4000;
-let capture = null;
-let lastImportedSignature = null;
-
-async function clipboardImage() {
-  const items = await navigator.clipboard.read();
-  for (const item of items) {
-    const type = item.types.find((t) => t.startsWith("image/"));
-    if (type) return item.getType(type);
-  }
-  return null;
-}
-
-async function blobSignature(blob) {
-  if (!blob) return null;
-  const head = new Uint8Array(await blob.slice(0, 2048).arrayBuffer());
-  let hash = blob.size;
-  head.forEach((byte) => { hash = (hash * 31 + byte) >>> 0; });
-  return `${blob.size}:${hash}`;
-}
-
+// ── 캡처한 그림 넣기 ──
 function addCapture(kind, blob) {
   const now = new Date();
   const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, "0")).join("");
   const extension = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
-  files[kind].push(new File([blob], `Safe_b_작업허가서_캡처_${stamp}.${extension}`, { type: blob.type }));
-  capture = null;
+  files[kind].push(new File([blob], `Safe_B_작업허가서_캡처_${stamp}.${extension}`, { type: blob.type }));
   renderSlots();
   showStatus(`캡처한 화면을 작업허가서 칸에 넣었습니다(${files[kind].length}장). 더 캡처하거나 '검토하기'를 누르세요.`);
-}
-
-function startCapture(kind) {
-  // 버튼을 누른 그 순간에 바로 실행해야 브라우저가 막지 않는다(먼저 다른 확인 창을 띄우면 막힘)
-  // Windows 10·11 캡처 도구(Win+Shift+S와 같음). 브라우저가 '열기'를 물으면 허용한다.
-  window.location.href = "ms-screenclip:";
-  const clipboardBlocked = !navigator.clipboard || !navigator.clipboard.read;
-  capture = { kind, until: Date.now() + CAPTURE_WAIT_MS, clipboardBlocked, toolOpened: false, startedAt: Date.now() };
-  showStatus(clipboardBlocked
-    ? "캡처 도구에서 Safe_b의 작업허가서 영역을 드래그한 뒤, 이 화면에서 Ctrl+V를 누르세요."
-    : "캡처 도구에서 Safe_b의 작업허가서 영역을 드래그하세요. 이 화면으로 돌아오면 자동으로 들어옵니다.");
-  if (!clipboardBlocked) waitForClipboard();
-}
-
-// 캡처 도구가 열리면 이 화면이 잠시 포커스를 잃는다 → 그 뒤에 들어온 클립보드 그림만 가져온다
-window.addEventListener("blur", () => {
-  if (capture) capture.toolOpened = true;
-});
-
-async function waitForClipboard() {
-  while (capture && Date.now() < capture.until) {
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    if (!capture) return;
-    if (!capture.toolOpened && Date.now() - capture.startedAt > TOOL_OPEN_TIMEOUT_MS) {
-      showStatus("캡처 도구가 열리지 않았습니다(회사 PC에서 막혀 있을 수 있음). Win+Shift+S로 캡처한 뒤 Ctrl+V를 누르거나, '🖥 창 선택 캡처'를 사용하세요.", true);
-      capture.clipboardBlocked = true;
-      return;
-    }
-    if (!capture.toolOpened || !document.hasFocus()) continue; // 클립보드는 이 화면이 앞에 있을 때만 읽힌다
-    try {
-      const blob = await clipboardImage();
-      const signature = await blobSignature(blob);
-      if (blob && signature !== lastImportedSignature) {
-        lastImportedSignature = signature;
-        addCapture(capture.kind, blob);
-        return;
-      }
-    } catch (error) {
-      if (error && error.name === "NotAllowedError") {
-        capture.clipboardBlocked = true;
-        showStatus("클립보드 읽기가 허용되지 않았습니다. 캡처한 뒤 이 화면에서 Ctrl+V를 누르세요.", true);
-        return;
-      }
-    }
-  }
 }
 
 // ── 창 선택 캡처(브라우저 화면 공유 기능) → 영역 자르기 ──
@@ -339,12 +263,12 @@ function openCropper(kind, source) {
   document.body.appendChild(overlay);
 }
 
-// Ctrl+V: 캡처 중이면 그 칸에, 아니면 작업허가서 칸에 붙여 넣는다
+// Ctrl+V: 클립보드의 그림(Win+Shift+S로 찍은 것 등)을 작업허가서 칸에 붙여 넣는다
 document.addEventListener("paste", (event) => {
   const image = [...(event.clipboardData ? event.clipboardData.files : [])].find((f) => f.type.startsWith("image/"));
   if (!image) return;
   event.preventDefault();
-  addCapture(capture ? capture.kind : "permit", image);
+  addCapture("permit", image);
 });
 
 async function runReview() {
@@ -394,7 +318,10 @@ async function runReview() {
         problems,
         results: lastReview.results,
         summary: lastReview.summary,
-        extracted: Object.fromEntries(Object.entries(docs).map(([kind, doc]) => [kind, doc.files.map((f) => ({ file: f.fileName, lines: f.lines, names: f.names, dates: f.dates }))])),
+        extracted: Object.fromEntries(Object.entries(docs).map(([kind, doc]) => [kind, doc.files.map((f) => ({
+          file: f.fileName, lines: f.lines, names: f.names, dates: f.dates,
+          options: (f.options || []).map((o) => `p${o.page} ${o.filled === null ? o.density : o.filled} @${o.textIndex} ${o.text.slice(0, 40)}`),
+        }))])),
       }),
     });
   }
@@ -511,7 +438,7 @@ function exportExcel() {
 
 // 시험용 두 번째 장면(전기+화기): 주소 끝에 #demo2
 const SAMPLE_FILES_2 = {
-  permit: ["samples/scenario2/작업허가서.xlsx"],
+  permit: ["samples/scenario2/작업허가서_캡처.png"],
   plan: ["samples/scenario2/작업계획서.pdf"],
   risk: ["samples/위험성평가_샘플.xlsx"],
   education: ["samples/scenario2/특별교육_전기화기.pdf"],
