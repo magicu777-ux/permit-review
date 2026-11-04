@@ -10,8 +10,9 @@ const SLOT_HINTS = {
   attachments: "자격증·화기감시자 지정서·채용시 교육",
 };
 // 사진을 넣을 수 있는 칸, 그중 그림 속 글자를 인식(OCR)할 칸(교육 사진은 사람 사진이라 인식하지 않음)
-const IMAGE_SLOTS = ["permit", "education", "attachments"];
-const OCR_SLOTS = ["permit", "attachments"];
+// 계획서·위험성평가는 압축 안에 도면·스캔 그림이 같이 오는 경우가 있어 그림도 받는다
+const IMAGE_SLOTS = ["permit", "plan", "risk", "education", "attachments"];
+const OCR_SLOTS = ["permit", "plan", "risk", "attachments"];
 const IMAGE_NAME = /\.(jpe?g|png|gif|bmp|webp|heic)$/i;
 const STATUS_LABEL = { ok: "적합", warn: "확인 필요", fail: "미흡", manual: "직접 확인", info: "참고" };
 const SECTION_ORDER = ["제출 서류", "작업 정보", "작업계획서", "화기 작업", "위험성평가", "특별안전교육", "서류 간 일치"];
@@ -58,7 +59,7 @@ function renderSlots() {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    const documentTypes = ".pdf,.xlsx,.xlsm,.xls,.docx,.pptx,.doc,.ppt";
+    const documentTypes = ".pdf,.xlsx,.xlsm,.xls,.docx,.pptx,.doc,.ppt,.zip";
     input.accept = IMAGE_SLOTS.includes(kind) ? `${documentTypes},image/*` : documentTypes;
     input.id = `file-${kind}`;
     input.addEventListener("change", () => addFiles(kind, input.files));
@@ -90,7 +91,7 @@ function renderSlots() {
     files[kind].forEach((file, index) => {
       const item = document.createElement("li");
       const name = document.createElement("span");
-      name.textContent = file.name;
+      name.textContent = file.origin ? `📦 ${file.origin} › ${file.zipPath || file.name}` : file.name;
       if (IMAGE_NAME.test(file.name)) {
         const thumb = document.createElement("img");
         thumb.className = "thumb";
@@ -130,13 +131,35 @@ function renderSlots() {
   reviewButton.disabled = !Object.values(files).some((list) => list.length);
 }
 
-function addFiles(kind, fileList) {
-  const added = [...fileList].filter((file) => acceptable(kind, file));
-  if (added.length < fileList.length) {
-    showStatus(`PDF, 엑셀, Word(docx), PowerPoint(pptx)${IMAGE_SLOTS.includes(kind) ? ", 사진" : ""} 파일만 넣을 수 있습니다.`, true);
+// 압축 파일(zip)은 넣는 즉시 풀어서 안의 파일을 하나씩 칸에 넣는다(읽을 수 없는 파일은 건너뛰고 알려 줌)
+async function addFiles(kind, fileList) {
+  const incoming = [...fileList];
+  const added = [];
+  const skipped = [];
+  for (const file of incoming) {
+    if (/\.zip$/i.test(file.name)) {
+      showStatus(`${file.name} 압축을 푸는 중입니다…`);
+      try {
+        const unpacked = await unzipFile(file);
+        unpacked.files.forEach((inner) => (acceptable(kind, inner) ? added.push(inner) : skipped.push(inner.name)));
+        skipped.push(...unpacked.skipped);
+        if (!unpacked.files.length) skipped.push(`${file.name}(빈 압축)`);
+      } catch (error) {
+        skipped.push(`${file.name}(${error.message || "압축을 풀지 못함"})`);
+      }
+    } else if (acceptable(kind, file)) {
+      added.push(file);
+    } else {
+      skipped.push(file.name);
+    }
   }
   files[kind].push(...added);
   renderSlots();
+  if (skipped.length) {
+    showStatus(`읽을 수 없는 파일은 건너뛰었습니다: ${skipped.join(", ")} — PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진, zip만 넣을 수 있습니다.`, true);
+  } else if (incoming.some((f) => /\.zip$/i.test(f.name))) {
+    showStatus(`압축을 풀어 ${added.length}개 파일을 ${DOC_KINDS[kind]} 칸에 넣었습니다.`);
+  }
 }
 
 // ── Safe_b 화면 캡처 ──
@@ -345,7 +368,8 @@ async function runReview() {
             }
           },
         });
-        if (ocr && part.lines.length <= 1) problems.push(`${file.name}: 그림에서 글자를 읽지 못했습니다.`);
+        // 허가서 캡처는 글자가 있어야 한다(계획서·기타의 그림은 도면·사진이라 글자가 없을 수 있음)
+        if (ocr && kind === "permit" && part.lines.length <= 1) problems.push(`${file.name}: 그림에서 글자를 읽지 못했습니다.`);
         // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
         if (part.lines.length <= 1 && !IMAGE_NAME.test(file.name)) {
           problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
@@ -501,6 +525,13 @@ const SAMPLE_FILES_3 = {
   education: ["samples/office/특별안전교육_밀폐공간.pptx"],
 };
 
+// 시험용 네 번째 장면(작업계획서·특별교육을 압축으로, 한글 이름은 Windows 방식 CP949): 주소 끝에 #demo4
+const SAMPLE_FILES_4 = {
+  ...SAMPLE_FILES,
+  plan: ["samples/zip/작업계획서_묶음.zip"],
+  education: ["samples/zip/특별교육_묶음.zip"],
+};
+
 async function loadSamples(sampleFiles = SAMPLE_FILES) {
   showStatus("샘플 서류를 불러오는 중입니다…");
   try {
@@ -510,7 +541,7 @@ async function loadSamples(sampleFiles = SAMPLE_FILES) {
         const resp = await fetch(path);
         if (!resp.ok) throw new Error(path);
         const blob = await resp.blob();
-        files[kind].push(new File([blob], path.split("/").pop()));
+        await addFiles(kind, [new File([blob], path.split("/").pop(), { type: blob.type })]);
       }
     }
     renderSlots();
@@ -536,3 +567,4 @@ renderSlots();
 if (/^#demo(report)?$/.test(location.hash)) loadSamples();
 if (/^#demo2(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_2);
 if (/^#demo3(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_3);
+if (/^#demo4(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_4);

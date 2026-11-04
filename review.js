@@ -80,6 +80,87 @@ function readXlsx(arrayBuffer) {
   return { lines, pages: [], tables, images: 0 };
 }
 
+// ── 압축 파일(zip) 풀기 ──
+// 한국어 Windows에서 만든 zip은 파일 이름이 CP949라 그대로 풀면 한글이 깨진다 → zip 목록을 직접 읽어 이름을 판별한다.
+// 압축 해제는 브라우저 내장 DecompressionStream(deflate-raw)을 쓴다.
+const ZIP_SKIP = /(^|\/)(__MACOSX\/|\.DS_Store$|Thumbs\.db$|desktop\.ini$)/i;
+const MAX_ZIP_DEPTH = 2;
+
+function decodeZipName(bytes, utf8Flag) {
+  if (utf8Flag) return new TextDecoder("utf-8").decode(bytes);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    return new TextDecoder("euc-kr").decode(bytes);
+  }
+}
+
+async function inflateRaw(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// 결과: { files: [File(.zipPath, .origin)], skipped: ['이름(이유)'] }
+async function unzipFile(file, depth = 0) {
+  const buffer = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let end = -1;
+  for (let i = buffer.length - 22; i >= Math.max(0, buffer.length - 65557); i -= 1) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0) throw new Error("압축 파일을 읽지 못했습니다(zip 형식만 지원).");
+
+  const count = view.getUint16(end + 10, true);
+  let pos = view.getUint32(end + 16, true);
+  const result = { files: [], skipped: [] };
+  const origin = file.origin ? `${file.origin} › ${file.zipPath || file.name}` : file.name;
+  for (let n = 0; n < count && view.getUint32(pos, true) === 0x02014b50; n += 1) {
+    const flags = view.getUint16(pos + 8, true);
+    const method = view.getUint16(pos + 10, true);
+    const compressedSize = view.getUint32(pos + 20, true);
+    const nameLength = view.getUint16(pos + 28, true);
+    const extraLength = view.getUint16(pos + 30, true);
+    const commentLength = view.getUint16(pos + 32, true);
+    const localOffset = view.getUint32(pos + 42, true);
+    const path = decodeZipName(buffer.subarray(pos + 46, pos + 46 + nameLength), flags & 0x800);
+    pos += 46 + nameLength + extraLength + commentLength;
+
+    if (path.endsWith("/") || ZIP_SKIP.test(path)) continue;
+    const baseName = path.split("/").pop();
+    if (flags & 0x1) {
+      result.skipped.push(`${baseName}(암호)`);
+      continue;
+    }
+    if (method !== 0 && method !== 8) {
+      result.skipped.push(`${baseName}(지원하지 않는 압축 방식)`);
+      continue;
+    }
+    const start = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+    const raw = buffer.subarray(start, start + compressedSize);
+    const bytes = method === 8 ? await inflateRaw(raw) : raw;
+    const inner = new File([bytes], baseName, { type: guessType(baseName) });
+    inner.zipPath = path;
+    inner.origin = origin;
+    if (/\.zip$/i.test(baseName) && depth < MAX_ZIP_DEPTH) {
+      const nested = await unzipFile(inner, depth + 1);
+      result.files.push(...nested.files);
+      result.skipped.push(...nested.skipped);
+    } else {
+      result.files.push(inner);
+    }
+  }
+  return result;
+}
+
+function guessType(name) {
+  const ext = (name.split(".").pop() || "").toLowerCase();
+  return { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", bmp: "image/bmp", webp: "image/webp",
+    pdf: "application/pdf" }[ext] || "";
+}
+
 // ── Word(docx)·PowerPoint(pptx) ──
 // 둘 다 zip 안의 XML이다. zip은 SheetJS에 들어 있는 CFB로 풀고, XML은 브라우저 DOMParser로 읽는다.
 function zipEntries(arrayBuffer) {
@@ -284,8 +365,14 @@ async function readDocument(file, options = {}) {
     else if (/\.(doc|ppt)$/i.test(name)) throw new Error("옛 형식(.doc·.ppt)은 읽을 수 없습니다. Word·PowerPoint에서 docx·pptx 또는 PDF로 다시 저장해 주세요.");
     else throw new Error("PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진 파일만 읽을 수 있습니다.");
   }
-  // 파일 이름도 단서로 쓴다(예: '지게차운전기능사_홍길동.jpg', '화기감시자_지정서.pdf')
-  return { ...part, fileName: name, lines: [`[파일] ${name.replace(/[_\-.]+/g, " ")}`, ...part.lines] };
+  // 파일 이름(압축 안 폴더 포함)도 단서로 쓴다(예: '지게차운전기능사_홍길동.jpg', '화기감시자_지정서.pdf')
+  const displayName = file.origin ? `${file.origin} › ${file.zipPath || name}` : name;
+  return {
+    ...part,
+    fileName: displayName,
+    origin: file.origin || null,
+    lines: [`[파일] ${(file.zipPath || name).replace(/[_\-./]+/g, " ")}`, ...part.lines],
+  };
 }
 
 // ── 글자에서 정보 뽑기 ──
@@ -355,7 +442,8 @@ function findNames(lines, tables) {
   // PDF(또는 머리글을 못 찾은 엑셀): 명단 줄 아래·괄호 안의 2~4글자 한글 단어
   if (!names.size) {
     let inList = false;
-    lines.forEach((line) => {
+    // 파일 이름 줄('[파일] 이수자 확인서 pdf')은 명단의 시작으로 보지 않는다
+    lines.filter((line) => !line.startsWith("[파일]")).forEach((line) => {
       // 괄호 안 명단 '(김민수, 이준호)': 쉼표로 나눈 항목이 모두 이름 한 단어일 때만 명단으로 본다
       // ('(안전대 착용, 안전고리 체결)' 같은 문구는 제외)
       (line.match(/\(([^)]*)\)/g) || []).forEach((group) => {
@@ -672,11 +760,11 @@ function reviewDocuments(docs) {
     const hireDocs = [education, attachments].filter(Boolean).flatMap((d) => d.files);
     const hasHireEducation = (hours) => hireDocs.some((f) => hasAny(f.text, rules.hireEducation)
       && (!hours || (f.hours !== null && f.hours >= hours)));
+    // 일지와 따로 넣은 사진 파일(같은 압축 안 또는 같은 칸)
+    const photoFiles = education.files.filter((f) => f.lines.length <= 1 && f.images);
+    const logFiles = education.files.filter((f) => f.lines.length > 1);
     education.files.forEach((file) => {
-      if (!file.lines.length || file.lines.length <= 1) {
-        if (file.images) add(S6, file.fileName, "교육 사진", "info", "사진 파일입니다.");
-        return;
-      }
+      if (!file.lines.length || file.lines.length <= 1) return;
       const label = `[${file.fileName}]`;
       rules.educationItems.forEach((item) => {
         const line = findLine(file.lines, item.keywords);
@@ -712,9 +800,22 @@ function reviewDocuments(docs) {
       }
       add(S6, file.fileName, `${label} 교육시간`, status, detail, rules.educationBasis);
 
-      // 증빙사진
-      add(S6, file.fileName, `${label} 교육 증빙사진`, file.images ? "ok" : "fail",
-        file.images ? `사진(이미지) ${file.images}장` : "교육 사진을 찾지 못했습니다.", rules.educationBasis);
+      // 증빙사진: 일지 안의 사진 → 같은 압축 안의 사진 파일 → (일지가 하나뿐이면) 칸에 따로 넣은 사진 파일
+      const samePack = file.origin ? photoFiles.filter((p) => p.origin === file.origin) : [];
+      const loose = logFiles.length === 1 ? photoFiles : photoFiles.filter((p) => !p.origin);
+      let photoStatus = "fail";
+      let photoDetail = "교육 사진을 찾지 못했습니다.";
+      if (file.images) {
+        photoStatus = "ok";
+        photoDetail = `일지 안의 사진(이미지) ${file.images}장`;
+      } else if (samePack.length) {
+        photoStatus = "ok";
+        photoDetail = `같은 압축 파일 안의 사진 파일 ${samePack.length}장`;
+      } else if (loose.length) {
+        photoStatus = logFiles.length === 1 ? "ok" : "warn";
+        photoDetail = `따로 넣은 사진 파일 ${loose.length}장${logFiles.length === 1 ? "" : " — 어느 교육일지의 사진인지 확인하세요"}`;
+      }
+      add(S6, file.fileName, `${label} 교육 증빙사진`, photoStatus, photoDetail, rules.educationBasis);
       add(S6, file.fileName, `${label} 사진 확인`, "manual",
         `교육 대상 ${file.names.length ? `${file.names.length}명(강사 제외)` : "인원 미확인"} — ${rules.photoChecks.join(" / ")}`);
     });
