@@ -80,6 +80,91 @@ function readXlsx(arrayBuffer) {
   return { lines, pages: [], tables, images: 0 };
 }
 
+// ── Word(docx)·PowerPoint(pptx) ──
+// 둘 다 zip 안의 XML이다. zip은 SheetJS에 들어 있는 CFB로 풀고, XML은 브라우저 DOMParser로 읽는다.
+function zipEntries(arrayBuffer) {
+  const container = XLSX.CFB.read(new Uint8Array(arrayBuffer), { type: "array" });
+  const entries = new Map();
+  container.FullPaths.forEach((path, index) => {
+    const file = container.FileIndex[index];
+    if (file && file.type === 2 && file.content) entries.set(path.replace(/^[^/]*\//, ""), file.content);
+  });
+  return entries;
+}
+
+function zipXml(entries, path) {
+  const content = entries.get(path);
+  if (!content) return null;
+  return new DOMParser().parseFromString(new TextDecoder("utf-8").decode(content), "application/xml");
+}
+
+function textOf(node, textTag) {
+  return [...node.getElementsByTagName(textTag)].map((t) => t.textContent).join("").replace(/\s+/g, " ").trim();
+}
+
+function mediaCount(entries, prefix) {
+  return [...entries.keys()].filter((path) => path.startsWith(prefix) && /\.(png|jpe?g|gif|bmp|emf|wmf|tiff?)$/i.test(path)).length;
+}
+
+function readDocx(arrayBuffer) {
+  const entries = zipEntries(arrayBuffer);
+  const doc = zipXml(entries, "word/document.xml");
+  if (!doc) throw new Error("Word 문서 내용을 찾지 못했습니다.");
+  const body = doc.getElementsByTagName("w:body")[0];
+  const pages = [{ lines: [], images: 0 }];
+  const tables = [];
+  const pushLine = (line) => line && pages[pages.length - 1].lines.push(line);
+  // 본문 순서대로: 문단은 한 줄, 표는 행마다 한 줄(칸은 공백으로 잇고, 이름 찾기용 표로도 둔다)
+  [...body.children].forEach((node) => {
+    if (node.tagName === "w:p") {
+      const breaksPage = node.getElementsByTagName("w:lastRenderedPageBreak").length
+        || [...node.getElementsByTagName("w:br")].some((br) => br.getAttribute("w:type") === "page");
+      if (breaksPage && pages[pages.length - 1].lines.length) pages.push({ lines: [], images: 0 });
+      pushLine(textOf(node, "w:t"));
+    } else if (node.tagName === "w:tbl") {
+      const rows = [...node.getElementsByTagName("w:tr")].map((tr) =>
+        [...tr.getElementsByTagName("w:tc")].map((tc) => textOf(tc, "w:t")));
+      tables.push(rows);
+      rows.forEach((row) => pushLine(row.filter(Boolean).join(" ")));
+    }
+  });
+  const images = mediaCount(entries, "word/media/");
+  return { lines: pages.flatMap((p) => p.lines), pages, tables, images };
+}
+
+function readPptx(arrayBuffer) {
+  const entries = zipEntries(arrayBuffer);
+  const slidePaths = [...entries.keys()]
+    .filter((path) => /^ppt\/slides\/slide\d+\.xml$/.test(path))
+    .sort((a, b) => Number(a.match(/(\d+)\.xml$/)[1]) - Number(b.match(/(\d+)\.xml$/)[1]));
+  if (!slidePaths.length) throw new Error("슬라이드를 찾지 못했습니다.");
+  const pages = [];
+  const tables = [];
+  let images = 0;
+  slidePaths.forEach((path) => {
+    const slide = zipXml(entries, path);
+    const lines = [];
+    // 표(a:tbl)는 행 단위로, 나머지 글상자는 문단(a:p) 단위로 읽는다
+    const tableNodes = [...slide.getElementsByTagName("a:tbl")];
+    tableNodes.forEach((tbl) => {
+      const rows = [...tbl.getElementsByTagName("a:tr")].map((tr) =>
+        [...tr.getElementsByTagName("a:tc")].map((tc) => textOf(tc, "a:t")));
+      tables.push(rows);
+      rows.forEach((row) => row.some(Boolean) && lines.push(row.filter(Boolean).join(" ")));
+    });
+    [...slide.getElementsByTagName("a:p")].forEach((p) => {
+      if (tableNodes.some((tbl) => tbl.contains(p))) return;
+      const line = textOf(p, "a:t");
+      if (line) lines.push(line);
+    });
+    // 슬라이드에 놓인 그림 수(교육 사진 확인용)
+    const pictures = slide.getElementsByTagName("p:pic").length;
+    images += pictures;
+    pages.push({ lines, images: pictures });
+  });
+  return { lines: pages.flatMap((p) => p.lines), pages, tables, images: images || mediaCount(entries, "ppt/media/") };
+}
+
 const IMAGE_FILE = /\.(jpe?g|png|gif|bmp|webp|heic)$/i;
 
 // ── 그림 속 글자 인식(OCR): Safe_b 화면 캡처, 자격증 사진 등 ──
@@ -194,7 +279,10 @@ async function readDocument(file, options = {}) {
     const buffer = await file.arrayBuffer();
     if (/\.pdf$/i.test(name)) part = await readPdf(buffer);
     else if (/\.(xlsx|xlsm|xls)$/i.test(name)) part = readXlsx(buffer);
-    else throw new Error("PDF, 엑셀(xlsx), 사진 파일만 읽을 수 있습니다.");
+    else if (/\.docx$/i.test(name)) part = readDocx(buffer);
+    else if (/\.pptx$/i.test(name)) part = readPptx(buffer);
+    else if (/\.(doc|ppt)$/i.test(name)) throw new Error("옛 형식(.doc·.ppt)은 읽을 수 없습니다. Word·PowerPoint에서 docx·pptx 또는 PDF로 다시 저장해 주세요.");
+    else throw new Error("PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진 파일만 읽을 수 있습니다.");
   }
   // 파일 이름도 단서로 쓴다(예: '지게차운전기능사_홍길동.jpg', '화기감시자_지정서.pdf')
   return { ...part, fileName: name, lines: [`[파일] ${name.replace(/[_\-.]+/g, " ")}`, ...part.lines] };

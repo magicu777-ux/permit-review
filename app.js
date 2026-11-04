@@ -40,7 +40,8 @@ function showStatus(text, isError) {
 }
 
 function acceptable(kind, file) {
-  return /\.(pdf|xlsx|xlsm|xls)$/i.test(file.name)
+  // .doc·.ppt(옛 형식)도 받아 두고, 읽을 때 '다시 저장' 안내를 띄운다
+  return /\.(pdf|xlsx|xlsm|xls|docx|pptx|doc|ppt)$/i.test(file.name)
     || (IMAGE_SLOTS.includes(kind) && /\.(jpe?g|png|gif|bmp|webp|heic)$/i.test(file.name));
 }
 
@@ -57,7 +58,8 @@ function renderSlots() {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = IMAGE_SLOTS.includes(kind) ? ".pdf,.xlsx,.xlsm,.xls,image/*" : ".pdf,.xlsx,.xlsm,.xls";
+    const documentTypes = ".pdf,.xlsx,.xlsm,.xls,.docx,.pptx,.doc,.ppt";
+    input.accept = IMAGE_SLOTS.includes(kind) ? `${documentTypes},image/*` : documentTypes;
     input.id = `file-${kind}`;
     input.addEventListener("change", () => addFiles(kind, input.files));
 
@@ -131,7 +133,7 @@ function renderSlots() {
 function addFiles(kind, fileList) {
   const added = [...fileList].filter((file) => acceptable(kind, file));
   if (added.length < fileList.length) {
-    showStatus(IMAGE_SLOTS.includes(kind) ? "PDF, 엑셀(xlsx), 사진 파일만 넣을 수 있습니다." : "PDF 또는 엑셀(xlsx) 파일만 넣을 수 있습니다.", true);
+    showStatus(`PDF, 엑셀, Word(docx), PowerPoint(pptx)${IMAGE_SLOTS.includes(kind) ? ", 사진" : ""} 파일만 넣을 수 있습니다.`, true);
   }
   files[kind].push(...added);
   renderSlots();
@@ -492,6 +494,13 @@ const SAMPLE_FILES_2 = {
   attachments: ["samples/scenario2/화기감시자_지정서.pdf"],
 };
 
+// 시험용 세 번째 장면(장면 1을 Word·PowerPoint로): 주소 끝에 #demo3
+const SAMPLE_FILES_3 = {
+  ...SAMPLE_FILES,
+  plan: ["samples/office/작업계획서.docx"],
+  education: ["samples/office/특별안전교육_밀폐공간.pptx"],
+};
+
 async function loadSamples(sampleFiles = SAMPLE_FILES) {
   showStatus("샘플 서류를 불러오는 중입니다…");
   try {
@@ -526,3 +535,4 @@ document.getElementById("printButton").addEventListener("click", () => window.pr
 renderSlots();
 if (/^#demo(report)?$/.test(location.hash)) loadSamples();
 if (/^#demo2(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_2);
+if (/^#demo3(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_3);
