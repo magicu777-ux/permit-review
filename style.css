@@ -14,6 +14,8 @@
   --warn-soft: #fff4e0;
   --fail: #b91c1c;
   --fail-soft: #fde8e8;
+  --manual: #5b3fa8;
+  --manual-soft: #f0ebfb;
   --info: #4b5b70;
   --info-soft: #eef2f7;
 }
@@ -138,6 +140,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .tile.ok { background: var(--ok-soft); color: var(--ok); }
 .tile.warn { background: var(--warn-soft); color: var(--warn); }
 .tile.fail { background: var(--fail-soft); color: var(--fail); }
+.tile.manual { background: var(--manual-soft); color: var(--manual); }
 
 .work-info {
   display: grid;
@@ -166,6 +169,7 @@ table.result col.c-title { width: 32%; }
 .badge.warn { background: var(--warn-soft); color: var(--warn); }
 .badge.fail { background: var(--fail-soft); color: var(--fail); }
 .badge.info { background: var(--info-soft); color: var(--info); }
+.badge.manual { background: var(--manual-soft); color: var(--manual); }
 
 .extracted { margin-top: 18px; }
 .extracted summary { cursor: pointer; font-weight: 600; color: var(--accent); }

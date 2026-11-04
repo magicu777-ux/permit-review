@@ -4,22 +4,26 @@
 
 const SLOT_HINTS = {
   permit: "작업 종류·일자·작업자",
-  plan: "작업방법·안전대책",
-  risk: "위험요인·감소대책",
-  education: "교육시간·이수자 명단",
+  plan: "작업지휘자·서명·도면",
+  risk: "위험요인·위험도(상중하)",
+  education: "작업별 교육일지·사진",
+  attachments: "자격증·화기감시자 지정서·채용시 교육",
 };
-const STATUS_LABEL = { ok: "적합", warn: "확인 필요", fail: "미흡", info: "참고" };
-const SECTION_ORDER = ["제출 서류", "작업 정보", "작업계획서", "위험성평가", "특별안전교육", "서류 간 일치"];
+// 사진을 넣을 수 있는 칸
+const IMAGE_SLOTS = ["education", "attachments"];
+const STATUS_LABEL = { ok: "적합", warn: "확인 필요", fail: "미흡", manual: "직접 확인", info: "참고" };
+const SECTION_ORDER = ["제출 서류", "작업 정보", "작업계획서", "화기 작업", "위험성평가", "특별안전교육", "서류 간 일치"];
 
 // 샘플(가상 서류) — samples 폴더
 const SAMPLE_FILES = {
   permit: ["samples/작업허가서_샘플.xlsx"],
   plan: ["samples/작업계획서_샘플.pdf"],
   risk: ["samples/위험성평가_샘플.xlsx"],
-  education: ["samples/특별안전교육_샘플.pdf"],
+  education: ["samples/특별안전교육_밀폐공간_샘플.pdf"],
+  attachments: ["samples/고소작업대_조종교육_이수증_샘플.pdf"],
 };
 
-const files = { permit: [], plan: [], risk: [], education: [] };
+const files = { permit: [], plan: [], risk: [], education: [], attachments: [] };
 let lastReview = null;
 
 const slotsEl = document.getElementById("slots");
@@ -33,8 +37,9 @@ function showStatus(text, isError) {
   statusEl.classList.remove("hidden");
 }
 
-function acceptable(file) {
-  return /\.(pdf|xlsx|xlsm|xls)$/i.test(file.name);
+function acceptable(kind, file) {
+  return /\.(pdf|xlsx|xlsm|xls)$/i.test(file.name)
+    || (IMAGE_SLOTS.includes(kind) && /\.(jpe?g|png|gif|bmp|webp|heic)$/i.test(file.name));
 }
 
 function renderSlots() {
@@ -50,7 +55,7 @@ function renderSlots() {
     const input = document.createElement("input");
     input.type = "file";
     input.multiple = true;
-    input.accept = ".pdf,.xlsx,.xlsm,.xls";
+    input.accept = IMAGE_SLOTS.includes(kind) ? ".pdf,.xlsx,.xlsm,.xls,image/*" : ".pdf,.xlsx,.xlsm,.xls";
     input.id = `file-${kind}`;
     input.addEventListener("change", () => addFiles(kind, input.files));
 
@@ -97,9 +102,9 @@ function renderSlots() {
 }
 
 function addFiles(kind, fileList) {
-  const added = [...fileList].filter(acceptable);
+  const added = [...fileList].filter((file) => acceptable(kind, file));
   if (added.length < fileList.length) {
-    showStatus("PDF 또는 엑셀(xlsx) 파일만 넣을 수 있습니다.", true);
+    showStatus(IMAGE_SLOTS.includes(kind) ? "PDF, 엑셀(xlsx), 사진 파일만 넣을 수 있습니다." : "PDF 또는 엑셀(xlsx) 파일만 넣을 수 있습니다.", true);
   }
   files[kind].push(...added);
   renderSlots();
@@ -116,13 +121,16 @@ async function runReview() {
     for (const file of list) {
       try {
         const part = await readDocument(file);
-        if (!part.lines.length) problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
+        // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
+        if (part.lines.length <= 1 && !/\.(jpe?g|png|gif|bmp|webp|heic)$/i.test(file.name)) {
+          problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
+        }
         parts.push(part);
       } catch (error) {
         problems.push(`${file.name}: ${error.message || "읽지 못했습니다."}`);
       }
     }
-    if (parts.some((part) => part.lines.length)) docs[kind] = analyzeDocument(kind, parts);
+    if (parts.length) docs[kind] = analyzeDocument(kind, parts);
   }
   lastReview = { ...reviewDocuments(docs), docs, reviewedAt: new Date() };
   renderResult(lastReview);
@@ -141,13 +149,13 @@ function cell(tag, text, className) {
 function renderResult({ results, summary, docs }) {
   resultPanel.classList.remove("hidden");
 
-  const counts = { ok: 0, warn: 0, fail: 0 };
+  const counts = { ok: 0, warn: 0, fail: 0, manual: 0 };
   results.forEach((r) => {
     if (r.status in counts) counts[r.status] += 1;
   });
   const summaryEl = document.getElementById("summary");
   summaryEl.innerHTML = "";
-  [["fail", "미흡"], ["warn", "확인 필요"], ["ok", "적합"]].forEach(([status, label]) => {
+  [["fail", "미흡(반려 사유)"], ["warn", "확인 필요"], ["manual", "직접 확인"], ["ok", "적합"]].forEach(([status, label]) => {
     const tile = cell("div", undefined, `tile ${status}`);
     tile.append(cell("div", String(counts[status]), "num"), cell("div", label, "label"));
     summaryEl.appendChild(tile);
@@ -159,6 +167,8 @@ function renderResult({ results, summary, docs }) {
   dl.className = "work-info";
   [
     ["작업 종류", summary.workTypes.join(", ") || "알 수 없음"],
+    ["작업계획서 작성 대상", summary.planTargets.join(", ") || "해당 없음"],
+    ["특별교육 대상", summary.educationTypes.join(" / ") || "해당 없음"],
     ["작업일", summary.workDates.length ? summary.workDates.join(", ") : "알 수 없음"],
     ["작업자", summary.workers.length ? `${summary.workers.length}명 (${summary.workers.join(", ")})` : "명단을 읽지 못함"],
   ].forEach(([term, value]) => dl.append(cell("dt", term), cell("dd", value)));
@@ -174,8 +184,8 @@ function renderResult({ results, summary, docs }) {
     table.innerHTML = '<colgroup><col class="c-status"><col class="c-title"><col></colgroup>'
       + "<thead><tr><th>결과</th><th>항목</th><th>근거·확인 내용</th></tr></thead>";
     const tbody = document.createElement("tbody");
-    // 미흡 → 확인 필요 → 적합 → 참고 순
-    const rank = { fail: 0, warn: 1, ok: 2, info: 3 };
+    // 미흡 → 확인 필요 → 직접 확인 → 적합 → 참고 순
+    const rank = { fail: 0, warn: 1, manual: 2, ok: 3, info: 4 };
     [...rows].sort((a, b) => rank[a.status] - rank[b.status]).forEach((r) => {
       const tr = document.createElement("tr");
       const statusTd = document.createElement("td");
@@ -194,16 +204,18 @@ function renderResult({ results, summary, docs }) {
   const extracted = document.getElementById("extracted");
   extracted.innerHTML = "";
   const table = document.createElement("table");
-  table.innerHTML = "<thead><tr><th>서류</th><th>작업 종류</th><th>날짜</th><th>이름</th><th>교육시간</th><th>줄 수</th></tr></thead>";
+  table.innerHTML = "<thead><tr><th>서류</th><th>파일</th><th>작업 종류</th><th>날짜</th><th>이름</th><th>교육시간</th><th>사진</th></tr></thead>";
   const tbody = document.createElement("tbody");
   Object.entries(DOC_KINDS).forEach(([kind, label]) => {
     const doc = docs[kind];
     if (!doc) return;
-    const tr = document.createElement("tr");
-    [label, doc.workTypes.map((t) => t.name).join(", ") || "-", doc.dates.join(", ") || "-",
-      doc.names.join(", ") || "-", doc.hours === null ? "-" : `${doc.hours}시간`, String(doc.lines.length)]
-      .forEach((value) => tr.appendChild(cell("td", value)));
-    tbody.appendChild(tr);
+    doc.files.forEach((file) => {
+      const tr = document.createElement("tr");
+      [label, file.fileName, file.workTypes.map((t) => t.name).join(", ") || "-", file.dates.join(", ") || "-",
+        file.names.join(", ") || "-", kind === "education" && file.hours !== null ? `${file.hours}시간` : "-", String(file.images)]
+        .forEach((value) => tr.appendChild(cell("td", value)));
+      tbody.appendChild(tr);
+    });
   });
   table.appendChild(tbody);
   extracted.appendChild(table);
@@ -218,6 +230,8 @@ function exportExcel() {
     ["작업허가 서류 검토 결과"],
     ["검토일시", reviewedAt.toLocaleString("ko-KR")],
     ["작업 종류", summary.workTypes.join(", ")],
+    ["작업계획서 작성 대상", summary.planTargets.join(", ")],
+    ["특별교육 대상", summary.educationTypes.join(" / ")],
     ["작업일", summary.workDates.join(", ")],
     ["작업자", summary.workers.join(", ")],
     [],
@@ -234,10 +248,19 @@ function exportExcel() {
   XLSX.writeFile(book, `작업허가_서류검토_${stamp}.xlsx`);
 }
 
-async function loadSamples() {
+// 시험용 두 번째 장면(전기+화기): 주소 끝에 #demo2
+const SAMPLE_FILES_2 = {
+  permit: ["samples/scenario2/작업허가서.xlsx"],
+  plan: ["samples/scenario2/작업계획서.pdf"],
+  risk: ["samples/위험성평가_샘플.xlsx"],
+  education: ["samples/scenario2/특별교육_전기화기.pdf"],
+  attachments: ["samples/scenario2/화기감시자_지정서.pdf"],
+};
+
+async function loadSamples(sampleFiles = SAMPLE_FILES) {
   showStatus("샘플 서류를 불러오는 중입니다…");
   try {
-    for (const [kind, paths] of Object.entries(SAMPLE_FILES)) {
+    for (const [kind, paths] of Object.entries(sampleFiles)) {
       files[kind] = [];
       for (const path of paths) {
         const resp = await fetch(path);
@@ -254,7 +277,7 @@ async function loadSamples() {
 }
 
 reviewButton.addEventListener("click", runReview);
-document.getElementById("sampleButton").addEventListener("click", loadSamples);
+document.getElementById("sampleButton").addEventListener("click", () => loadSamples());
 document.getElementById("resetButton").addEventListener("click", () => {
   Object.keys(files).forEach((kind) => { files[kind] = []; });
   lastReview = null;
@@ -267,3 +290,4 @@ document.getElementById("printButton").addEventListener("click", () => window.pr
 
 renderSlots();
 if (location.hash === "#demo") loadSamples();
+if (location.hash === "#demo2") loadSamples(SAMPLE_FILES_2);
