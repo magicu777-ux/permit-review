@@ -132,6 +132,11 @@ window.PERMIT_RULES = {
     },
   ],
 
+  // ── 검토하지 않는 파일(압축 안에 같이 들어와도 건너뜀) ──
+  excludeFiles: [
+    { pattern: "swing|스윙", reason: "Swing 작업계획서(검토 대상 아님)" },
+  ],
+
   // ── 작업허가서(Safe_B 화면) ──
   permitForm: {
     // 반드시 입력·선택되어 있어야 하는 칸(label: 화면의 항목 이름, 글자 인식으로 띄어쓰기가 바뀌어도 맞도록 \s*)

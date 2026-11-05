@@ -365,7 +365,10 @@ function reviewPermitForm(form, docs, add) {
       } else if (req.doc === "planTitle") {
         evidence = planFiles.find((f) => hasAny(f.text, req.keywords));
       } else if (req.doc === "handlingPage1") {
-        evidence = handlingPlans.find((f) => page1Options(f).some((o) => o.filled && hasAny(o.text, req.keywords)));
+        // 1쪽에서 체크된 장비, 또는 장비별로 따로 만든 계획서의 파일 이름('…작업계획서_크레인')
+        const fileTitle = (f) => f.fileName.split("›").pop();
+        evidence = handlingPlans.find((f) => page1Options(f).some((o) => o.filled && hasAny(o.text, req.keywords))
+          || hasAny(fileTitle(f), req.keywords));
       }
       if (evidence) missing.push(`${category.name}(${evidence.fileName})`);
     });

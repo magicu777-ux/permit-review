@@ -862,6 +862,19 @@ function activeLines(doc) {
   return doc.lines.map((line) => unchecked.filter((o) => line.includes(o.text)).reduce((l, o) => l.replace(o.text, " "), line));
 }
 
+// 문서보안(DRM) 암호화 파일 알아보기: 파일 형식에 맞는 머리 글자(PDF '%PDF', docx·pptx·xlsx 'PK', 옛 Office D0CF)가
+// 아니면 암호화(또는 손상)된 것이다. 'SCDSA'로 시작하면 SoftCamp 문서보안.
+function detectDrm(name, buffer) {
+  const head = new Uint8Array(buffer.slice(0, 1024));
+  const ascii = String.fromCharCode(...head.slice(0, 8));
+  if (ascii.startsWith("SCDSA")) return "문서보안(SoftCamp)";
+  const text = String.fromCharCode(...head);
+  if (/\.pdf$/i.test(name)) return text.includes("%PDF") ? null : "암호화 또는 손상";
+  if (/\.(docx|pptx|xlsx|xlsm)$/i.test(name)) return ascii.startsWith("PK") ? null : "암호화 또는 손상";
+  if (/\.(doc|ppt|xls)$/i.test(name)) return head[0] === 0xd0 && head[1] === 0xcf ? null : "암호화 또는 손상";
+  return null;
+}
+
 async function readDocument(file, options = {}) {
   const name = file.name;
   let part;
@@ -883,6 +896,14 @@ async function readDocument(file, options = {}) {
     }
   } else {
     const buffer = await file.arrayBuffer();
+    const drm = detectDrm(name, buffer);
+    if (drm) {
+      // 회사 문서보안(DRM)으로 암호화된 파일: 내용은 읽을 수 없고 파일 이름만 단서로 쓴다
+      return {
+        lines: [`[파일] ${(file.zipPath || name).replace(/[_\-./]+/g, " ")}`], pages: [], tables: [], images: 0, options: [],
+        drm, fileName: file.origin ? `${file.origin} › ${file.zipPath || name}` : name, origin: file.origin || null,
+      };
+    }
     if (/\.pdf$/i.test(name)) part = await readPdf(buffer);
     else if (/\.(xlsx|xlsm|xls)$/i.test(name)) part = readXlsx(buffer);
     else if (/\.docx$/i.test(name)) part = readDocx(buffer);
@@ -1412,6 +1433,8 @@ function reviewDocuments(docs) {
       missing.length ? `참여 명단에 없는 작업자: ${formatList(missing)}` : "작업자 모두 참여 명단에 있습니다.", rules.riskBasis);
   }
 
+  applyDrmLimits(docs, results, add);
+
   return {
     results,
     summary: {
@@ -1422,6 +1445,33 @@ function reviewDocuments(docs) {
       workers,
     },
   };
+}
+
+// 문서보안(DRM)으로 암호화된 파일이 있으면: 그 파일들을 알리고, 그 서류 내용으로 판단하는 '못 찾음' 결과는
+// '미흡'이 아니라 '직접 확인'으로 바꾼다(내용을 못 읽었을 뿐, 없다고 단정할 수 없으므로). 파일 이름으로 확인된 항목은 그대로.
+const DRM_SLOT_WORDS = {
+  plan: ["작업계획서", "화기 작업", "화기감시자", "신호수", "작업지휘자", "자격서류", "[장비 사용]", "[중량물]", "[전기]"],
+  education: ["특별안전교육", "교육"],
+  risk: ["위험성평가"],
+  attachments: ["기타 첨부", "자격서류", "화기감시자"],
+};
+
+function applyDrmLimits(docs, results, add) {
+  const drmFiles = Object.entries(docs).flatMap(([kind, doc]) => (doc ? doc.files : [])
+    .filter((f) => f.drm).map((f) => ({ kind, name: f.fileName, drm: f.drm })));
+  if (!drmFiles.length) return;
+  const slots = [...new Set(drmFiles.map((f) => f.kind))];
+  results.forEach((r) => {
+    if (!["fail", "warn"].includes(r.status)) return;
+    if (!/찾지 못|없습니다|읽지 못|확인하지 못|첨부 필요|첨부되지|없음|있지 않습니다/.test(r.detail)) return;
+    const hay = `${r.section} ${r.doc} ${r.title}`;
+    if (!slots.some((kind) => (DRM_SLOT_WORDS[kind] || []).some((word) => hay.includes(word)))) return;
+    r.status = "manual";
+    r.detail += " — 암호화(DRM) 파일이 있어 내용을 확인하지 못했습니다. 문서를 열어 직접 확인하거나, 해당 쪽을 '창 선택 캡처'로 넣어 주세요.";
+  });
+  add("제출 서류", "암호화 파일", `암호화(DRM) 파일 ${drmFiles.length}개 — 내용 검토 불가`, "warn",
+    `${drmFiles.map((f) => `${f.name}(${f.drm})`).join(", ")}. 파일 이름으로 제출 여부만 확인했습니다. `
+    + "내용까지 검토하려면 ① 보안 해제(복호화)한 파일을 넣거나 ② 문서를 열고 각 쪽을 '🖥 창 선택 캡처'로 넣어 주세요.");
 }
 
 window.PermitReview = { DOC_KINDS, readDocument, analyzeDocument, reviewDocuments };

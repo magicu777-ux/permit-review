@@ -69,16 +69,13 @@ function renderSlots() {
     pick.htmlFor = input.id;
     pick.textContent = "파일 선택 또는 끌어 놓기";
 
-    // 작업허가서: Safe_b 화면을 캡처 도구로 찍어 바로 넣는다
-    // 작업허가서: 브라우저가 Safe_B 창을 직접 찍고, 필요한 영역을 잘라 넣는다(Ctrl+V 붙여넣기도 됨)
-    let windowCaptureButton = null;
-    if (kind === "permit") {
-      windowCaptureButton = document.createElement("button");
-      windowCaptureButton.type = "button";
-      windowCaptureButton.className = "capture";
-      windowCaptureButton.textContent = "🖥 Safe_B 창 선택 캡처";
-      windowCaptureButton.addEventListener("click", () => startWindowCapture(kind));
-    }
+    // 브라우저가 창을 직접 찍고 필요한 영역을 잘라 넣는다(작업허가서는 Safe_B 화면, 그 밖의 칸은
+    // 문서보안(DRM)으로 파일을 못 읽을 때 문서를 열어 놓고 쪽마다 찍어 넣는다). 찍은 그림은 글자 인식으로 읽는다.
+    const windowCaptureButton = document.createElement("button");
+    windowCaptureButton.type = "button";
+    windowCaptureButton.className = kind === "permit" ? "capture" : "capture secondary";
+    windowCaptureButton.textContent = kind === "permit" ? "🖥 Safe_B 창 선택 캡처" : "🖥 창 선택 캡처";
+    windowCaptureButton.addEventListener("click", () => startWindowCapture(kind));
 
     const list = document.createElement("ul");
     list.className = "file-list";
@@ -130,30 +127,38 @@ async function addFiles(kind, fileList) {
   const incoming = [...fileList];
   const added = [];
   const skipped = [];
+  const excluded = [];
+  // 검토 대상이 아닌 파일(Swing 작업계획서 등)은 넣지 않고 알려 준다
+  const exclusion = (file) => (window.PERMIT_RULES.excludeFiles || [])
+    .find((rule) => new RegExp(rule.pattern, "i").test(file.zipPath || file.name));
+  const take = (file) => {
+    const rule = exclusion(file);
+    if (rule) excluded.push(`${file.name}(${rule.reason})`);
+    else if (acceptable(kind, file)) added.push(file);
+    else skipped.push(file.name);
+  };
   for (const file of incoming) {
     if (/\.zip$/i.test(file.name)) {
       showStatus(`${file.name} 압축을 푸는 중입니다…`);
       try {
         const unpacked = await unzipFile(file);
-        unpacked.files.forEach((inner) => (acceptable(kind, inner) ? added.push(inner) : skipped.push(inner.name)));
+        unpacked.files.forEach(take);
         skipped.push(...unpacked.skipped);
         if (!unpacked.files.length) skipped.push(`${file.name}(빈 압축)`);
       } catch (error) {
         skipped.push(`${file.name}(${error.message || "압축을 풀지 못함"})`);
       }
-    } else if (acceptable(kind, file)) {
-      added.push(file);
     } else {
-      skipped.push(file.name);
+      take(file);
     }
   }
   files[kind].push(...added);
   renderSlots();
-  if (skipped.length) {
-    showStatus(`읽을 수 없는 파일은 건너뛰었습니다: ${skipped.join(", ")} — PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진, zip만 넣을 수 있습니다.`, true);
-  } else if (incoming.some((f) => /\.zip$/i.test(f.name))) {
-    showStatus(`압축을 풀어 ${added.length}개 파일을 ${DOC_KINDS[kind]} 칸에 넣었습니다.`);
-  }
+  const notes = [];
+  if (excluded.length) notes.push(`검토 대상이 아니어서 뺐습니다: ${excluded.join(", ")}`);
+  if (skipped.length) notes.push(`읽을 수 없는 파일은 건너뛰었습니다: ${skipped.join(", ")} — PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진, zip만 넣을 수 있습니다.`);
+  if (notes.length) showStatus(notes.join(" / "), Boolean(skipped.length));
+  else if (incoming.some((f) => /\.zip$/i.test(f.name))) showStatus(`압축을 풀어 ${added.length}개 파일을 ${DOC_KINDS[kind]} 칸에 넣었습니다.`);
 }
 
 // ── 캡처한 그림 넣기 ──
@@ -161,9 +166,12 @@ function addCapture(kind, blob) {
   const now = new Date();
   const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, "0")).join("");
   const extension = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
-  files[kind].push(new File([blob], `Safe_B_작업허가서_캡처_${stamp}.${extension}`, { type: blob.type }));
+  const prefix = kind === "permit" ? "Safe_B_작업허가서" : DOC_KINDS[kind];
+  const file = new File([blob], `${prefix}_캡처_${stamp}.${extension}`, { type: blob.type });
+  file.captured = true; // 찍은 화면은 어느 칸이든 글자 인식으로 읽는다
+  files[kind].push(file);
   renderSlots();
-  showStatus(`캡처한 화면을 작업허가서 칸에 넣었습니다(${files[kind].length}장). 더 캡처하거나 '검토하기'를 누르세요.`);
+  showStatus(`캡처한 화면을 ${DOC_KINDS[kind]} 칸에 넣었습니다(${files[kind].length}개). 더 캡처하거나 '검토하기'를 누르세요.`);
 }
 
 // ── 창 선택 캡처(브라우저 화면 공유 기능) → 영역 자르기 ──
@@ -281,7 +289,7 @@ async function runReview() {
     const parts = [];
     for (const [index, file] of list.entries()) {
       try {
-        const ocr = OCR_SLOTS.includes(kind) && IMAGE_NAME.test(file.name);
+        const ocr = (OCR_SLOTS.includes(kind) || file.captured) && IMAGE_NAME.test(file.name);
         const part = await readDocument(file, {
           ocr,
           onProgress: (message) => {
@@ -294,8 +302,10 @@ async function runReview() {
         });
         // 허가서 캡처는 글자가 있어야 한다(계획서·기타의 그림은 도면·사진이라 글자가 없을 수 있음)
         if (ocr && kind === "permit" && part.lines.length <= 1) problems.push(`${file.name}: 그림에서 글자를 읽지 못했습니다.`);
-        // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
-        if (part.lines.length <= 1 && !IMAGE_NAME.test(file.name)) {
+        if (part.drm) {
+          problems.push(`${file.name}: 암호화(${part.drm})되어 내용을 읽지 못했습니다(파일 이름만 확인)`);
+        } else if (part.lines.length <= 1 && !IMAGE_NAME.test(file.name)) {
+          // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
           problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
         }
         parts.push(part);
@@ -468,7 +478,7 @@ async function loadSamples(sampleFiles = SAMPLE_FILES) {
         const resp = await fetch(path);
         if (!resp.ok) throw new Error(path);
         const blob = await resp.blob();
-        await addFiles(kind, [new File([blob], path.split("/").pop(), { type: blob.type })]);
+        await addFiles(kind, [new File([blob], decodeURIComponent(path.split("/").pop()), { type: blob.type })]);
       }
     }
     renderSlots();
