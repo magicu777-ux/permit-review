@@ -245,3 +245,5 @@ table.result col.c-title { width: 32%; }
 .capture-bar input[type="text"] { min-width: 200px; padding: 5px 8px; border-radius: 6px; border: 0; }
 .capture-bar label { display: flex; align-items: center; gap: 4px; }
 @media print { .capture-bar { display: none; } }
+.file-list li.locked { background: #fff7ed; }
+.file-list .capture-this { margin-left: auto; white-space: nowrap; font-size: 12px; padding: 3px 8px; }

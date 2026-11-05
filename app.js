@@ -1,5 +1,5 @@
 // 화면: 서류 칸(드래그·선택) → 검토 → 결과 표·엑셀 저장
-/* global XLSX, DOC_KINDS, readDocument, analyzeDocument, reviewDocuments, mergeCapturedParts, unzipFile */
+/* global XLSX, DOC_KINDS, readDocument, analyzeDocument, reviewDocuments, mergeCapturedParts, unzipFile, detectDrm */
 // DOC_KINDS·readDocument 등은 review.js에서 전역으로 선언된다.
 
 const SLOT_HINTS = {
@@ -124,7 +124,18 @@ function renderSlots() {
         files[kind].splice(index, 1);
         renderSlots();
       });
-      item.append(name, remove);
+      if (file.drm) {
+        // 암호화 파일: 이 PC에서 열어 놓은 문서 창을 찍어 이 파일 대신 넣는다
+        item.classList.add("locked");
+        name.prepend("🔒 ");
+        const captureThis = cell("button", "🖥 열어서 캡처", "capture-this");
+        captureThis.type = "button";
+        captureThis.title = "이 파일을 더블클릭해 연 다음 누르세요";
+        captureThis.addEventListener("click", () => startWindowCapture(kind, file));
+        item.append(name, captureThis, remove);
+      } else {
+        item.append(name, remove);
+      }
       list.appendChild(item);
     });
 
@@ -177,12 +188,26 @@ async function addFiles(kind, fileList) {
       take(file);
     }
   }
+  // 문서보안(DRM) 파일은 넣을 때 바로 알아 둔다 → 목록에 🔒와 '열어서 캡처' 버튼을 보여 준다
+  for (const file of added) {
+    if (IMAGE_NAME.test(file.name)) continue;
+    try {
+      file.drm = detectDrm(file.name, await file.slice(0, 1024).arrayBuffer());
+    } catch (error) {
+      file.drm = null;
+    }
+  }
   files[kind].push(...added);
   renderSlots();
+  const locked = added.filter((f) => f.drm);
   const notes = [];
+  if (locked.length) {
+    notes.push(`🔒 암호화(문서보안) 파일 ${locked.length}개는 내용을 읽을 수 없습니다. 이 PC에서 압축을 풀고 파일을 더블클릭해 연 다음, `
+      + `목록의 '🖥 열어서 캡처'를 눌러 쪽마다 찍어 넣으세요(찍은 문서가 그 파일을 대신합니다)`);
+  }
   if (excluded.length) notes.push(`검토 대상이 아니어서 뺐습니다: ${excluded.join(", ")}`);
   if (skipped.length) notes.push(`읽을 수 없는 파일은 건너뛰었습니다: ${skipped.join(", ")} — PDF, 엑셀, Word(docx), PowerPoint(pptx), 사진, zip만 넣을 수 있습니다.`);
-  if (notes.length) showStatus(notes.join(" / "), Boolean(skipped.length));
+  if (notes.length) showStatus(notes.join(" / "), Boolean(skipped.length || locked.length));
   else if (incoming.some((f) => /\.zip$/i.test(f.name))) showStatus(`압축을 풀어 ${added.length}개 파일을 ${DOC_KINDS[kind]} 칸에 넣었습니다.`);
 }
 
@@ -234,7 +259,8 @@ function signatureDiff(a, b) {
   return sum / a.length;
 }
 
-async function startWindowCapture(kind) {
+// target: '열어서 캡처'를 누른 암호화 파일(있으면 그 파일 이름으로 찍고, 끝내면 그 파일을 대신한다)
+async function startWindowCapture(kind, target) {
   if (captureSession) {
     showStatus("이미 캡처 중입니다. 화면 아래 막대의 '끝내기'를 누른 뒤 다시 시작하세요.", true);
     return;
@@ -264,16 +290,17 @@ async function startWindowCapture(kind) {
       stop();
       return;
     }
-    beginCaptureSession(kind, stream, video, area);
+    beginCaptureSession(kind, stream, video, area, target);
   });
 }
 
-function beginCaptureSession(kind, stream, video, area) {
+function beginCaptureSession(kind, stream, video, area, target) {
   const groupCount = new Set(files[kind].filter((f) => f.captureGroup).map((f) => f.captureGroup)).size;
+  const targetName = target ? (target.zipPath || target.name).split("/").pop().replace(/\.[^.]+$/, "") : "";
   const session = {
     kind, stream, video, area, pages: 0, lastSig: null, pendingSig: null,
     group: `capture-${Date.now()}`,
-    name: kind === "permit" ? "Safe_B 작업허가서" : `${DOC_KINDS[kind]} 캡처 ${groupCount + 1}`,
+    name: targetName || (kind === "permit" ? "Safe_B 작업허가서" : `${DOC_KINDS[kind]} 캡처 ${groupCount + 1}`),
   };
   captureSession = session;
 
@@ -335,6 +362,8 @@ function beginCaptureSession(kind, stream, video, area) {
     bar.remove();
     captureSession = null;
     files[kind].filter((f) => f.captureGroup === session.group).forEach((f) => { f.captureName = session.name; });
+    // 찍은 문서가 암호화 파일을 대신한다(파일 이름은 문서 이름으로 남음)
+    if (target && session.pages) files[kind] = files[kind].filter((f) => f !== target);
     renderSlots();
     showStatus(`'${session.name}' ${session.pages}쪽을 ${DOC_KINDS[kind]} 칸에 넣었습니다. '검토하기'를 누르면 글자를 인식해 검토합니다.`);
   };
@@ -487,6 +516,7 @@ async function runReview() {
       method: "POST",
       body: JSON.stringify({
         problems,
+        slots: slotsEl.innerText,
         results: lastReview.results,
         summary: lastReview.summary,
         extracted: Object.fromEntries(Object.entries(docs).map(([kind, doc]) => [kind, doc.files.map((f) => ({
