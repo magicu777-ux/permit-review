@@ -459,6 +459,7 @@ async function runReview() {
   showStatus("서류를 읽는 중입니다…");
   const docs = {};
   const problems = [];
+  const lockedNames = [];
   for (const [kind, list] of Object.entries(files)) {
     if (!list.length) continue;
     const parts = [];
@@ -478,7 +479,7 @@ async function runReview() {
         // 허가서 캡처는 글자가 있어야 한다(계획서·기타의 그림은 도면·사진이라 글자가 없을 수 있음)
         if (ocr && kind === "permit" && part.lines.length <= 1) problems.push(`${file.name}: 그림에서 글자를 읽지 못했습니다.`);
         if (part.drm) {
-          problems.push(`${file.name}: 암호화(${part.drm})되어 내용을 읽지 못했습니다(파일 이름만 확인)`);
+          lockedNames.push(file.name);
         } else if (part.lines.length <= 1 && !IMAGE_NAME.test(file.name)) {
           // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
           problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
@@ -504,6 +505,12 @@ async function runReview() {
       merged.push({ ...mergeCapturedParts(part.captureName, group), captureGroup: part.captureGroup });
     });
     if (merged.length) docs[kind] = analyzeDocument(kind, merged);
+  }
+  if (lockedNames.length) {
+    // 암호화 파일은 이름만 확인했다 → 다음에 할 일(열어서 캡처)을 알려 준다
+    problems.unshift(`🔒 암호화 파일 ${lockedNames.length}개는 파일 이름으로 제출 여부만 확인했습니다(내용 항목은 '직접 확인'). `
+      + `내용까지 검토하려면 각 파일을 이 PC에서 더블클릭해 연 다음, 위 목록에서 그 파일의 '🖥 열어서 캡처'로 쪽마다 찍고 다시 '검토하기'를 누르세요. `
+      + `(${lockedNames.join(", ")})`);
   }
   lastReview = { ...reviewDocuments(docs), docs, reviewedAt: new Date() };
   renderResult(lastReview);
