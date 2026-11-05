@@ -233,3 +233,15 @@ table.result col.c-title { width: 32%; }
   .panel { border: 0; padding: 0; }
   .extracted { display: none; }
 }
+
+/* 창 선택 캡처 중 막대(쪽을 넘기면 자동으로 찍음) */
+.capture-bar {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 60;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  max-width: calc(100vw - 32px); padding: 10px 14px;
+  background: var(--brand); color: #fff; border-radius: 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+}
+.capture-bar .capture-info { font-weight: 600; }
+.capture-bar input[type="text"] { min-width: 200px; padding: 5px 8px; border-radius: 6px; border: 0; }
+.capture-bar label { display: flex; align-items: center; gap: 4px; }
+@media print { .capture-bar { display: none; } }

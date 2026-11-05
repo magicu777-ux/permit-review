@@ -1044,6 +1044,27 @@ function detectWorkTypes(lines) {
   return window.PERMIT_RULES.workTypes.filter((type) => findLine(lines, type.keywords));
 }
 
+// 창 선택 캡처로 쪽마다 찍은 그림들(readDocument 결과)을 문서 하나로 합친다.
+// 쪽 순서를 지켜 pages[]를 만들고, 표시(options)의 page를 쪽 번호로 바꾼다(예: 하역운반기계 계획서 '1쪽' 확인).
+// 찍은 화면 자체는 교육 사진이 아니므로 images는 0으로 두고 captured 표시를 남긴다.
+function mergeCapturedParts(name, parts) {
+  const pages = parts.map((part) => ({ lines: part.lines.slice(1), images: 0 })); // 첫 줄은 '[파일] 캡처 이름'
+  return {
+    lines: [`[파일] ${name.replace(/[_\-./]+/g, " ")}`, ...pages.flatMap((page) => page.lines)],
+    pages,
+    tables: [],
+    images: 0,
+    options: parts.flatMap((part, index) => (part.options || []).map((option) => ({ ...option, page: index }))),
+    wordColors: parts.flatMap((part) => part.wordColors || []),
+    formCells: parts.flatMap((part) => part.formCells || []),
+    ocr: true,
+    captured: true,
+    capturePages: parts.length,
+    fileName: `📷 ${name} (캡처 ${parts.length}쪽)`,
+    origin: null,
+  };
+}
+
 function analyzePart(part) {
   const text = part.lines.join("\n");
   const rules = window.PERMIT_RULES;
@@ -1367,7 +1388,11 @@ function reviewDocuments(docs) {
       const loose = logFiles.length === 1 ? photoFiles : photoFiles.filter((p) => !p.origin);
       let photoStatus = "fail";
       let photoDetail = "교육 사진을 찾지 못했습니다.";
-      if (file.images) {
+      if (file.captured) {
+        // 화면을 찍어 넣은 일지: 일지 안 사진은 글자 인식으로 셀 수 없다
+        photoStatus = "manual";
+        photoDetail = "화면 캡처로 넣은 일지 — 일지 안의 교육 사진은 원본 문서에서 직접 확인하세요";
+      } else if (file.images) {
         photoStatus = "ok";
         photoDetail = `일지 안의 사진(이미지) ${file.images}장`;
       } else if (samePack.length) {

@@ -1,5 +1,5 @@
 // 화면: 서류 칸(드래그·선택) → 검토 → 결과 표·엑셀 저장
-/* global XLSX, DOC_KINDS, readDocument, analyzeDocument, reviewDocuments */
+/* global XLSX, DOC_KINDS, readDocument, analyzeDocument, reviewDocuments, mergeCapturedParts, unzipFile */
 // DOC_KINDS·readDocument 등은 review.js에서 전역으로 선언된다.
 
 const SLOT_HINTS = {
@@ -79,8 +79,33 @@ function renderSlots() {
 
     const list = document.createElement("ul");
     list.className = "file-list";
+    const shownGroups = new Set();
     files[kind].forEach((file, index) => {
       const item = document.createElement("li");
+      if (file.captureGroup) {
+        // 한 번에 찍은 여러 쪽은 문서 하나로 보여 주고, ✕는 묶음 전체를 뺀다
+        if (shownGroups.has(file.captureGroup)) return;
+        shownGroups.add(file.captureGroup);
+        const group = files[kind].filter((f) => f.captureGroup === file.captureGroup);
+        const name = cell("span", ` 📷 ${file.captureName} — 캡처 ${group.length}쪽`);
+        const thumb = document.createElement("img");
+        thumb.className = "thumb";
+        thumb.alt = "";
+        thumb.src = URL.createObjectURL(file);
+        thumb.title = "첫 쪽 크게 보기";
+        thumb.addEventListener("click", () => window.open(thumb.src, "_blank"));
+        name.prepend(thumb);
+        const remove = cell("button", "✕");
+        remove.type = "button";
+        remove.title = "이 캡처 문서 빼기";
+        remove.addEventListener("click", () => {
+          files[kind] = files[kind].filter((f) => f.captureGroup !== file.captureGroup);
+          renderSlots();
+        });
+        item.append(name, remove);
+        list.appendChild(item);
+        return;
+      }
       const name = document.createElement("span");
       name.textContent = file.origin ? `📦 ${file.origin} › ${file.zipPath || file.name}` : file.name;
       if (IMAGE_NAME.test(file.name)) {
@@ -162,20 +187,58 @@ async function addFiles(kind, fileList) {
 }
 
 // ── 캡처한 그림 넣기 ──
-function addCapture(kind, blob) {
+function addCapture(kind, blob, group) {
   const now = new Date();
   const stamp = [now.getHours(), now.getMinutes(), now.getSeconds()].map((n) => String(n).padStart(2, "0")).join("");
   const extension = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg");
   const prefix = kind === "permit" ? "Safe_B_작업허가서" : DOC_KINDS[kind];
   const file = new File([blob], `${prefix}_캡처_${stamp}.${extension}`, { type: blob.type });
   file.captured = true; // 찍은 화면은 어느 칸이든 글자 인식으로 읽는다
+  if (group) Object.assign(file, group); // 한 번의 캡처로 찍은 여러 쪽은 문서 하나(captureGroup)로 묶는다
   files[kind].push(file);
   renderSlots();
-  showStatus(`캡처한 화면을 ${DOC_KINDS[kind]} 칸에 넣었습니다(${files[kind].length}개). 더 캡처하거나 '검토하기'를 누르세요.`);
+  showStatus(`캡처한 화면을 ${DOC_KINDS[kind]} 칸에 넣었습니다. 더 캡처하거나 '검토하기'를 누르세요.`);
 }
 
-// ── 창 선택 캡처(브라우저 화면 공유 기능) → 영역 자르기 ──
+// ── 창 선택 캡처(브라우저 화면 공유 기능) ──
+// 문서보안(DRM) 파일은 이 PC에서 더블클릭해 열면 보이므로, 열린 창을 찍어 글자 인식으로 읽는다.
+// 창과 잘라낼 영역은 한 번만 고르고, 쪽을 넘기면(화면이 바뀌면) 자동으로 찍는다. 찍은 쪽들은 문서 하나로 묶는다.
+const AUTO_CAPTURE_MS = 800;
+let captureSession = null;
+
+function grabFrame(video, area) {
+  const canvas = document.createElement("canvas");
+  const a = area || { x: 0, y: 0, w: video.videoWidth, h: video.videoHeight };
+  canvas.width = Math.round(a.w);
+  canvas.height = Math.round(a.h);
+  canvas.getContext("2d").drawImage(video, a.x, a.y, a.w, a.h, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+// 화면이 바뀌었는지 보기 위한 작은 흑백 지문(48×27)과 두 지문의 차이(0~255)
+function frameSignature(canvas) {
+  const small = document.createElement("canvas");
+  small.width = 48;
+  small.height = 27;
+  const context = small.getContext("2d");
+  context.drawImage(canvas, 0, 0, 48, 27);
+  const px = context.getImageData(0, 0, 48, 27).data;
+  const sig = new Float32Array(48 * 27);
+  for (let i = 0; i < sig.length; i += 1) sig[i] = (px[i * 4] + px[i * 4 + 1] + px[i * 4 + 2]) / 3;
+  return sig;
+}
+
+function signatureDiff(a, b) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
 async function startWindowCapture(kind) {
+  if (captureSession) {
+    showStatus("이미 캡처 중입니다. 화면 아래 막대의 '끝내기'를 누른 뒤 다시 시작하세요.", true);
+    return;
+  }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
     showStatus("이 브라우저는 창 캡처를 지원하지 않습니다. 크롬·엣지 최신 버전에서 웹 주소로 열어 주세요.", true);
     return;
@@ -187,28 +250,114 @@ async function startWindowCapture(kind) {
     showStatus("창 선택을 취소했거나 브라우저가 허용하지 않았습니다.", true);
     return;
   }
-  try {
-    const video = document.createElement("video");
-    video.muted = true;
-    video.srcObject = stream;
-    await video.play();
-    await new Promise((resolve) => setTimeout(resolve, 300)); // 첫 화면이 그려질 때까지 잠시 기다린다
-    const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext("2d").drawImage(video, 0, 0);
-    openCropper(kind, canvas);
-  } finally {
-    stream.getTracks().forEach((track) => track.stop());
-  }
+  const video = document.createElement("video");
+  video.muted = true;
+  video.srcObject = stream;
+  await video.play();
+  await new Promise((resolve) => setTimeout(resolve, 300)); // 첫 화면이 그려질 때까지 잠시 기다린다
+  const stop = () => stream.getTracks().forEach((track) => track.stop());
+  const guide = kind === "permit"
+    ? "작업허가서 부분을 마우스로 드래그해 고르세요. 고르지 않으면 화면 전체를 넣습니다."
+    : "문서 내용(슬라이드·쪽) 부분을 드래그해 고르세요. 이 영역을 다음 쪽에도 그대로 씁니다. 고르지 않으면 화면 전체.";
+  openCropper(grabFrame(video), guide, (area) => {
+    if (!area) {
+      stop();
+      return;
+    }
+    beginCaptureSession(kind, stream, video, area);
+  });
 }
 
-function openCropper(kind, source) {
+function beginCaptureSession(kind, stream, video, area) {
+  const groupCount = new Set(files[kind].filter((f) => f.captureGroup).map((f) => f.captureGroup)).size;
+  const session = {
+    kind, stream, video, area, pages: 0, lastSig: null, pendingSig: null,
+    group: `capture-${Date.now()}`,
+    name: kind === "permit" ? "Safe_B 작업허가서" : `${DOC_KINDS[kind]} 캡처 ${groupCount + 1}`,
+  };
+  captureSession = session;
+
+  const bar = document.createElement("div");
+  bar.className = "capture-bar";
+  const info = cell("span", "", "capture-info");
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.value = session.name;
+  nameInput.title = "문서 이름(예: 특별안전교육(전기), 작업계획서_크레인) — 서류 구분에 쓰입니다";
+  nameInput.addEventListener("input", () => { session.name = nameInput.value.trim() || session.name; });
+  const autoLabel = document.createElement("label");
+  const autoBox = document.createElement("input");
+  autoBox.type = "checkbox";
+  autoBox.checked = true;
+  autoLabel.append(autoBox, " 쪽 넘기면 자동으로 찍기");
+  const shotButton = cell("button", "📸 지금 찍기");
+  shotButton.type = "button";
+  const endButton = cell("button", "끝내기", "primary");
+  endButton.type = "button";
+  bar.append(info, nameInput, autoLabel, shotButton, endButton);
+  document.body.appendChild(bar);
+  const updateInfo = () => {
+    info.textContent = `📷 ${DOC_KINDS[kind]} 캡처 중 · ${session.pages}쪽 찍음 — 문서 창에서 쪽을 넘기세요(PageDown)`;
+  };
+
+  const shoot = (canvas, sig) => new Promise((resolve) => canvas.toBlob((blob) => {
+    session.pages += 1;
+    session.lastSig = sig;
+    // 작업허가서는 한 장짜리 화면이라 묶지 않는다
+    addCapture(kind, blob, kind === "permit" ? null
+      : { captureGroup: session.group, capturePage: session.pages, captureName: session.name });
+    updateInfo();
+    resolve();
+  }, "image/png"));
+
+  const tick = async () => {
+    if (captureSession !== session || !autoBox.checked) return;
+    const canvas = grabFrame(video, area);
+    const sig = frameSignature(canvas);
+    if (session.lastSig && signatureDiff(sig, session.lastSig) < 4) {
+      session.pendingSig = null; // 같은 쪽
+      return;
+    }
+    // 화면이 바뀐 직후(넘김 효과 중)는 건너뛰고, 다음 확인에서도 그대로면 새 쪽으로 찍는다
+    if (session.pendingSig && signatureDiff(sig, session.pendingSig) < 2) {
+      session.pendingSig = null;
+      await shoot(canvas, sig);
+    } else {
+      session.pendingSig = sig;
+    }
+  };
+  const timer = setInterval(tick, AUTO_CAPTURE_MS);
+
+  const end = () => {
+    if (captureSession !== session) return;
+    clearInterval(timer);
+    stream.getTracks().forEach((track) => track.stop());
+    bar.remove();
+    captureSession = null;
+    files[kind].filter((f) => f.captureGroup === session.group).forEach((f) => { f.captureName = session.name; });
+    renderSlots();
+    showStatus(`'${session.name}' ${session.pages}쪽을 ${DOC_KINDS[kind]} 칸에 넣었습니다. '검토하기'를 누르면 글자를 인식해 검토합니다.`);
+  };
+  shotButton.addEventListener("click", () => {
+    const canvas = grabFrame(video, area);
+    shoot(canvas, frameSignature(canvas));
+  });
+  endButton.addEventListener("click", end);
+  stream.getVideoTracks()[0].addEventListener("ended", end); // 브라우저의 '공유 중지'를 눌러도 끝낸다
+
+  updateInfo();
+  const first = grabFrame(video, area);
+  shoot(first, frameSignature(first)); // 처음 보이는 쪽은 바로 찍는다
+  if (kind === "permit") setTimeout(end, 300); // 작업허가서는 한 장이면 충분
+}
+
+// onDone(area): 고른 영역(원본 화면 좌표) 또는 전체, 취소하면 null
+function openCropper(source, guideText, onDone) {
   const overlay = document.createElement("div");
   overlay.className = "cropper";
   const box = document.createElement("div");
   box.className = "cropper-box";
-  const guide = cell("p", "작업허가서 부분을 마우스로 드래그해 고르세요. 고르지 않으면 화면 전체를 넣습니다.", "cropper-guide");
+  const guide = cell("p", guideText, "cropper-guide");
   const stage = document.createElement("div");
   stage.className = "cropper-stage";
   const view = document.createElement("canvas");
@@ -245,24 +394,21 @@ function openCropper(kind, source) {
   view.addEventListener("pointerup", () => { start = null; });
 
   const close = () => overlay.remove();
-  const use = cell("button", "넣기", "primary");
+  const use = cell("button", "이 영역으로 시작", "primary");
   use.type = "button";
   use.addEventListener("click", () => {
     const area = rect && rect.w > 10 && rect.h > 10
       ? { x: rect.x / ratio, y: rect.y / ratio, w: rect.w / ratio, h: rect.h / ratio }
       : { x: 0, y: 0, w: source.width, h: source.height };
-    const out = document.createElement("canvas");
-    out.width = Math.round(area.w);
-    out.height = Math.round(area.h);
-    out.getContext("2d").drawImage(source, area.x, area.y, area.w, area.h, 0, 0, out.width, out.height);
-    out.toBlob((blob) => {
-      close();
-      addCapture(kind, blob);
-    }, "image/png");
+    close();
+    onDone(area);
   });
   const cancel = cell("button", "취소");
   cancel.type = "button";
-  cancel.addEventListener("click", close);
+  cancel.addEventListener("click", () => {
+    close();
+    onDone(null);
+  });
   const actions = document.createElement("div");
   actions.className = "actions";
   actions.append(use, cancel);
@@ -308,12 +454,27 @@ async function runReview() {
           // 첫 줄은 파일 이름이므로 글자가 그것뿐이면 스캔 이미지로 본다(사진 파일 제외)
           problems.push(`${file.name}: 글자가 없습니다(스캔 이미지일 수 있음).`);
         }
+        if (file.captureGroup) {
+          part.captureGroup = file.captureGroup;
+          part.captureName = file.captureName;
+        }
         parts.push(part);
       } catch (error) {
         problems.push(`${file.name}: ${error.message || "읽지 못했습니다."}`);
       }
     }
-    if (parts.length) docs[kind] = analyzeDocument(kind, parts);
+    // 창 선택 캡처로 찍은 쪽들은 찍은 순서대로 문서 하나로 합친다
+    const merged = [];
+    parts.forEach((part) => {
+      if (!part.captureGroup) {
+        merged.push(part);
+        return;
+      }
+      if (merged.some((p) => p.captureGroup === part.captureGroup)) return;
+      const group = parts.filter((p) => p.captureGroup === part.captureGroup);
+      merged.push({ ...mergeCapturedParts(part.captureName, group), captureGroup: part.captureGroup });
+    });
+    if (merged.length) docs[kind] = analyzeDocument(kind, merged);
   }
   lastReview = { ...reviewDocuments(docs), docs, reviewedAt: new Date() };
   renderResult(lastReview);
@@ -473,6 +634,7 @@ async function loadSamples(sampleFiles = SAMPLE_FILES) {
   showStatus("샘플 서류를 불러오는 중입니다…");
   try {
     for (const [kind, paths] of Object.entries(sampleFiles)) {
+      if (!paths.length) continue;
       files[kind] = [];
       for (const path of paths) {
         const resp = await fetch(path);
@@ -486,6 +648,31 @@ async function loadSamples(sampleFiles = SAMPLE_FILES) {
   } catch (error) {
     showStatus("샘플을 불러오지 못했습니다. 인터넷 주소(웹)로 열었을 때 사용할 수 있습니다.", true);
   }
+}
+
+// 시험용 다섯 번째 장면(장면 2의 작업계획서를 '창 선택 캡처'로 쪽마다 찍은 것처럼): 주소 끝에 #demo5
+// 실제 캡처는 화면 공유 허락이 필요해 자동 시험이 안 되므로, PDF 쪽을 그림으로 그려 캡처 묶음으로 넣는다.
+async function loadCaptureDemo() {
+  const { plan, ...rest } = SAMPLE_FILES_2;
+  const resp = await fetch(plan[0]);
+  const pdf = await window.pdfjsLib.getDocument({ data: await resp.arrayBuffer() }).promise;
+  const group = { captureGroup: "capture-demo", captureName: "작업계획서(전기·화기) 캡처" };
+  const pages = [];
+  for (let n = 1; n <= pdf.numPages; n += 1) {
+    const page = await pdf.getPage(n);
+    const viewport = page.getViewport({ scale: 1.6 });
+    const canvas = document.createElement("canvas");
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    const context = canvas.getContext("2d");
+    context.fillStyle = "#fff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport }).promise;
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+    pages.push(Object.assign(new File([blob], `작업계획서_캡처_${n}.png`, { type: "image/png" }), group, { captured: true, capturePage: n }));
+  }
+  files.plan = pages;
+  await loadSamples(rest);
 }
 
 reviewButton.addEventListener("click", runReview);
@@ -505,3 +692,4 @@ if (/^#demo(report)?$/.test(location.hash)) loadSamples();
 if (/^#demo2(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_2);
 if (/^#demo3(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_3);
 if (/^#demo4(report)?$/.test(location.hash)) loadSamples(SAMPLE_FILES_4);
+if (/^#demo5(report)?$/.test(location.hash)) loadCaptureDemo();
