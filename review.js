@@ -1431,7 +1431,8 @@ function reviewDocuments(docs) {
   }
 
   if (permit) {
-    const permitIds = permit.workTypes.map((t) => t.id);
+    // 허가서 작업 = 글자로 찾은 작업 + Safe_B 작업구분에서 '선택된' 작업
+    const permitIds = [...permit.workTypes.map((t) => t.id), ...(form ? permitWorkTypeIds(form) : [])];
     const extra = [plan, risk].filter(Boolean)
       .flatMap((doc) => doc.workTypes.filter((t) => !permitIds.includes(t.id)).map((t) => `${t.name}(${DOC_KINDS[doc.kind]})`));
     if (extra.length) {
