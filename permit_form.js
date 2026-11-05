@@ -32,6 +32,23 @@ function decideFilled(options) {
   }
 }
 
+// 글자 인식이 조금 틀린 버튼 이름('자량형', '시저령')을 두 글자 묶음이 가장 많이 겹치는 작업구분으로 짝짓는다.
+// 확실할 때만(겹침 2개 이상, 2등보다 많음) 돌려주고, 아니면 null.
+function bigrams(text) {
+  const t = compact(text).replace(/[^가-힣A-Za-z0-9.]/g, "");
+  const grams = new Set();
+  for (let i = 0; i + 1 < t.length; i += 1) grams.add(t.slice(i, i + 2));
+  return grams;
+}
+
+function closestCategory(text, categories) {
+  const grams = bigrams(text);
+  const scores = categories.map((c) => [...bigrams(c.name)].filter((g) => grams.has(g)).length);
+  const best = Math.max(...scores);
+  if (best < 2 || scores.filter((s) => s === best).length > 1) return null;
+  return scores.indexOf(best);
+}
+
 function labelMatches(line, labels) {
   const found = [];
   labels.forEach((label) => {
@@ -46,7 +63,41 @@ function labelMatches(line, labels) {
 }
 
 function cleanValue(value) {
-  return value.replace(/[|ㅣ_:：'"」「.,·\-~\s]+/g, " ").trim();
+  return value
+    .replace(/[|ㅣ_:：'"」「.,·\-~*\s]+/g, " ")
+    // 입력 칸의 검색(🔍 → 'Q')·펼침(▾ → 'v') 아이콘으로 읽힌 한 글자는 값이 아니다(빈 칸도 아이콘은 보인다)
+    .replace(/(^|\s)[Qqv∨⌄](?=\s|$)/g, " ")
+    .trim();
+}
+
+// 칸마다 어떤 항목인지 정한다: 이름이 읽힌 칸은 이름으로, 못 읽은 칸은 앞뒤로 이름이 읽힌 칸 사이의
+// 빈 개수가 Safe_B 화면 순서(order)와 맞을 때 그 순서로 채운다.
+function labelFormCells(cells, labels, order) {
+  const named = cells.map((cell) => {
+    const text = cell.label.replace(/\*/g, " ");
+    const hit = labels.find((l) => new RegExp(l.label).test(text) || new RegExp(l.label).test(text.replace(/\s/g, "")));
+    return { ...cell, name: hit ? hit.name : null };
+  });
+  const indexOf = (name) => order.indexOf(name);
+  const anchors = named.map((c, i) => [i, indexOf(c.name)]).filter(([, o]) => o >= 0);
+  for (let k = 0; k + 1 < anchors.length; k += 1) {
+    const [i1, o1] = anchors[k];
+    const [i2, o2] = anchors[k + 1];
+    if (i2 - i1 === o2 - o1) for (let i = i1 + 1; i < i2; i += 1) if (!named[i].name) named[i].name = order[o1 + (i - i1)];
+  }
+  // 맨 앞·맨 뒤 칸: 이웃한 이름 칸 바로 앞·뒤면 순서로 채운다
+  if (anchors.length) {
+    const [firstIndex, firstOrder] = anchors[0];
+    for (let i = firstIndex - 1, o = firstOrder - 1; i >= 0 && o >= 0 && !named[i].name; i -= 1, o -= 1) {
+      if (/신청자|관리\s*감독자|안전\s*관리자|관리\s*책임자/.test(named[i].label)) break;
+      named[i].name = order[o];
+    }
+    const [lastIndex, lastOrder] = anchors[anchors.length - 1];
+    for (let i = lastIndex + 1, o = lastOrder + 1; i < named.length && o < order.length && !named[i].name; i += 1, o += 1) {
+      named[i].name = order[o];
+    }
+  }
+  return named;
 }
 
 function readPermitForm(permit) {
@@ -56,7 +107,16 @@ function readPermitForm(permit) {
   const form = { fields: {}, yesNo: {}, categories: [], categoriesDecided: false, categoryLines: new Set() };
 
   // 1) 필수 입력 칸
+  //    Safe_B 화면은 항목 이름 칸·값 칸을 따로 읽은 결과(formCells)를 먼저 쓴다(더 정확함). 버튼으로 고르는 칸은 버튼 색으로 판단.
+  const cells = labelFormCells(permit.formCells || [], allLabels.concat(rules.otherLabels), rules.cellOrder);
   rules.fields.forEach((field) => {
+    const cell = field.choice ? null : cells.find((c) => c.name === field.name);
+    if (cell) {
+      const value = cleanValue(cell.value);
+      const meaningful = value.replace(/[^가-힣A-Za-z0-9]/g, "");
+      form.fields[field.name] = { found: true, value, empty: !meaningful || rules.placeholders.includes(compact(value)) };
+      return;
+    }
     for (let i = 0; i < lines.length; i += 1) {
       const matches = labelMatches(lines[i], allLabels);
       const index = matches.findIndex((m) => m.name === field.name);
@@ -67,7 +127,16 @@ function readPermitForm(permit) {
       // 항목 이름 아래 줄에 값이 있는 화면
       if (!value && i + 1 < lines.length && !labelMatches(lines[i + 1], allLabels).length) value = cleanValue(lines[i + 1]);
       const meaningful = value.replace(/[^가-힣A-Za-z0-9]/g, "");
-      const empty = !meaningful || rules.placeholders.includes(compact(value));
+      let empty = !meaningful || rules.placeholders.includes(compact(value));
+      // 버튼으로 고르는 칸(작업장소 구분): Safe_B 버튼이 읽혔으면 파란(선택된) 버튼이 있어야 한다
+      if (field.choice) {
+        const chips = (permit.options || []).filter((o) => o.chip && o.lineText === lines[i] && o.textIndex >= end && o.textIndex < next);
+        if (chips.length) {
+          const chosen = chips.filter((o) => o.filled);
+          empty = !chosen.length;
+          value = chosen.length ? `선택됨(${chosen.length}개)` : "선택된 버튼 없음";
+        }
+      }
       form.fields[field.name] = { found: true, value, empty };
       return;
     }
@@ -86,8 +155,15 @@ function readPermitForm(permit) {
     const index = matches.findIndex((m) => m.name === item.name);
     const start = matches[index].end;
     const end = index + 1 < matches.length ? matches[index + 1].start : line.length;
-    const pair = (permit.options || []).filter((o) => o.lineText === line && o.textIndex >= start && o.textIndex < end).slice(0, 2);
+    const pair = (permit.options || []).filter((o) => o.lineText === line && o.textIndex >= start && o.textIndex < end)
+      .sort((a, b) => (a.x ?? a.textIndex) - (b.x ?? b.textIndex)).slice(0, 2);
     let answer = null;
+    if (pair.length === 2 && pair.every((o) => o.chip)) {
+      // Safe_B 버튼: 둘 중 더 파란 쪽(차이가 분명할 때)
+      const [a, b] = pair;
+      pair.forEach((o) => { o.filled = false; });
+      if (Math.abs(a.blue - b.blue) >= 0.3) (a.blue > b.blue ? a : b).filled = true;
+    }
     if (pair.length === 2) {
       decideFilled(pair);
       // 글자가 읽혔으면 글자로, 아니면 화면 순서(예 → 아니오)로 어느 쪽인지 정한다
@@ -104,17 +180,64 @@ function readPermitForm(permit) {
     form.yesNo[item.name] = { found: true, answer, densities: pair.map((o) => o.density) };
   });
 
-  // 3) 작업구분: '작업구분' 줄부터 다음 항목 이름이 나오는 줄 전까지
-  const startIndex = lines.findIndex((line) => labelMatches(line, allLabels).some((m) => m.name === "작업구분"));
+  // 3) 작업구분: '작업구분' 줄과, 그 위·아래로 이어지는 선택지 줄(항목 이름이 없는 줄)
+  //    Safe_B는 '작업 구분' 이름이 두 줄 버튼의 가운데에 있어, 버튼 첫 줄이 이름 줄보다 위에 읽힌다.
+  let startIndex = lines.findIndex((line) => labelMatches(line, allLabels).some((m) => m.name === "작업구분"));
+  if (startIndex < 0) {
+    // '작업 구분' 이름을 못 읽었으면, 버튼 이름이 작업구분과 2개 이상 맞는 줄을 작업구분 줄로 본다
+    startIndex = lines.findIndex((line) => (permit.options || [])
+      .filter((o) => o.chip && o.lineText === line)
+      .filter((o) => rules.categories.some((c) => new RegExp(c.match).test(compact(o.text))) || closestCategory(o.text, rules.categories) !== null)
+      .length >= 2);
+  }
   if (startIndex >= 0) {
-    const area = [lines[startIndex]];
-    for (let i = startIndex + 1; i < lines.length; i += 1) {
-      if (labelMatches(lines[i], allLabels).length) break;
-      area.push(lines[i]);
+    const hasOptions = (line) => (permit.options || []).some((o) => o.lineText === line);
+    const isChoiceLine = (line) => !labelMatches(line, allLabels).length && hasOptions(line);
+    let first = startIndex;
+    while (first - 1 >= 0 && isChoiceLine(lines[first - 1])) first -= 1;
+    let last = startIndex;
+    while (last + 1 < lines.length && isChoiceLine(lines[last + 1])) last += 1;
+    // 선택 표시가 없는 화면(조회 화면 등)은 다음 항목 이름 줄 전까지
+    if (last === startIndex && !hasOptions(lines[startIndex])) {
+      while (last + 1 < lines.length && !labelMatches(lines[last + 1], allLabels).length) last += 1;
     }
+    const area = lines.slice(first, last + 1);
     area.forEach((line) => form.categoryLines.add(line));
     const options = (permit.options || []).filter((o) => form.categoryLines.has(o.lineText));
     const areaText = compact(area.join(" ").replace(new RegExp(rules.categoryLabel), ""));
+    // 버튼 상자는 화면 위치(줄 순서 → 왼쪽부터) 순서로 놓는다
+    const chips = options.filter((o) => o.chip)
+      .sort((a, b) => area.indexOf(a.lineText) - area.indexOf(b.lineText) || (a.x ?? a.textIndex) - (b.x ?? b.textIndex));
+    if (chips.length) {
+      // Safe_B 버튼: 버튼 수가 작업구분 수와 같으면 순서대로 짝짓는다(이름을 못 읽은 버튼도 알아낼 수 있음).
+      // 다르면 이름이 읽힌 버튼을 기준점으로 삼고, 기준점 사이 버튼 수가 맞는 구간만 순서로 채운다.
+      const assigned = new Array(chips.length).fill(null);
+      if (chips.length === rules.categories.length) {
+        chips.forEach((chip, i) => { assigned[i] = i; });
+      } else {
+        chips.forEach((chip, i) => {
+          const index = rules.categories.findIndex((c) => new RegExp(c.match).test(compact(chip.text)));
+          assigned[i] = index >= 0 ? index : closestCategory(chip.text, rules.categories);
+        });
+        const anchors = assigned.map((c, i) => [i, c]).filter(([, c]) => c !== null);
+        for (let k = 0; k + 1 < anchors.length; k += 1) {
+          const [i1, c1] = anchors[k];
+          const [i2, c2] = anchors[k + 1];
+          if (i2 - i1 === c2 - c1) for (let i = i1 + 1; i < i2; i += 1) assigned[i] = c1 + (i - i1);
+        }
+      }
+      rules.categories.forEach((category, index) => {
+        const i = assigned.indexOf(index);
+        form.categories.push({ ...category, option: i >= 0 ? chips[i] : null, selected: i >= 0 ? chips[i].filled : null });
+      });
+      form.categoriesDecided = form.categories.every((c) => c.selected !== null);
+      // 못 짝지은 칸이 있어도, 파란(선택된) 버튼이 모두 짝지어졌으면 선택 판단은 된 것으로 본다
+      if (!form.categoriesDecided && chips.filter((c) => c.filled).every((c) => assigned[chips.indexOf(c)] !== null)) {
+        form.categories.forEach((c) => { if (c.selected === null) c.selected = false; });
+        form.categoriesDecided = true;
+      }
+      return form;
+    }
     rules.categories.forEach((category) => {
       const pattern = new RegExp(category.match);
       const option = options.find((o) => pattern.test(compact(o.text)));
@@ -237,11 +360,8 @@ function reviewPermitForm(form, docs, add) {
     if (isSelected(category.id)) return;
     category.requires.forEach((req) => {
       let evidence = null;
-      if (req.doc === "education" && category.id !== "scaffoldRemove") {
+      if (req.doc === "education") {
         evidence = educationFiles.find((f) => hasAny(f.text, req.keywords));
-      } else if (req.doc === "education") {
-        // '비계' 교육(해체)은 '달비계'를 뺀 비계 교육일 때만
-        evidence = educationFiles.find((f) => /(^|[^달])비계/.test(f.text));
       } else if (req.doc === "planTitle") {
         evidence = planFiles.find((f) => hasAny(f.text, req.keywords));
       } else if (req.doc === "handlingPage1") {

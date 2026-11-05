@@ -155,40 +155,51 @@ LICENSE_HTML = f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{S
 </body></html>"""
 
 
+def chip(on, label):
+    """Safe-B의 '✓ 이름' 버튼: 고른 것만 파란 테두리·파란 글자."""
+    return f'<span class="chip{" on" if on else ""}"><b class="ck">✓</b> {label}</span>'
+
+
 def radio(selected_no):
-    """Safe_B의 예/아니오 라디오 버튼 모양."""
-    on, off = '●', '○'
-    return f"{off if selected_no else on} 예 &nbsp; {on if selected_no else off} 아니오"
+    """Safe-B의 예/아니오 버튼 한 쌍."""
+    return chip(not selected_no, '예') + chip(selected_no, '아니오')
 
 
 def check(on, label):
-    return f"{'☑' if on else '☐'} {label}"
+    return chip(on, label)
 
 
-CATEGORIES = [['화기작업', '고소작업(3.5m 이상)', '가시설물 설치', '가시설물 해체', '전기작업'],
-              ['건설기계(덤프트럭)', '건설기계(굴착기)', '고소작업대(차량형)', '고소작업대(시저형)', '이동식 크레인', '지게차']]
+# Safe-B 작업구분 버튼(화면 순서 그대로)
+CATEGORIES = ['밀폐공간작업(맨홀 포함)', '화기작업', '3.5m이상 고소작업', '가시설물 설치/해체작업', '도로점용작업', '전기작업', '굴착작업',
+              '건설기계작업(덤프트럭)', '건설기계작업(굴착기)', '하역운반기계/중량물취급작업(고소작업대/차량형)',
+              '하역운반기계/중량물취급작업(고소작업대/시저형)', '하역운반기계/중량물취급작업(이동식크레인)', '하역운반기계/중량물취급작업(지게차)']
 
 
 def permit_screen_html(selected, fields, workers, high_risk_no=True, urgent_no=True):
-    """Safe_B 작업허가서 화면을 흉내 낸 그림용 HTML(글자 인식 시험용)."""
-    categories = '<br>'.join(' &nbsp; '.join(check(name in selected, name) for name in row) for row in CATEGORIES)
+    """Safe-B '특별작업허가 신청' 화면을 흉내 낸 그림용 HTML(글자 인식 시험용, 가상).
+    항목 이름 칸은 옅은 파란 바탕(필수 항목은 조금 더 진함), 선택 버튼은 '✓ 이름'이고 고른 것만 파랗다."""
+    categories = ''.join(chip(name in selected, name) for name in CATEGORIES)
     f = fields
-    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">{STYLE}
-<style>body{{background:#fff;font-size:15px}} .bar{{background:#1f4f8f;color:#fff;padding:8px 12px;font-weight:bold}}
-th{{width:150px}}</style></head><body>
-<div class="bar">안전보건시스템 — 작업허가서 조회 (샘플 화면·가상)</div>
+    place = chip(True, '작업장소(사옥)') + chip(False, '작업장소(외부)')
+    th = lambda name, required=False: f'<th class="{"req" if required else ""}">{name}{" <b>*</b>" if required else ""}</th>'
+    return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<style>body{{font-family:'Malgun Gothic',sans-serif;font-size:13px;margin:16px;background:#fff;color:#333}}
+.bar{{background:#5b6be0;color:#fff;padding:10px 14px;font-weight:bold}} h2{{font-size:17px}}
+table{{width:100%;border-collapse:collapse}} th,td{{border:1px solid #e9ecef;padding:7px 10px;text-align:left}}
+th{{background:#eff2ff;width:120px;font-weight:bold}} th.req{{background:#dde4fe}} th b{{color:#e03131}}
+.chip{{display:inline-block;border:1px solid #e9ecef;border-radius:4px;padding:3px 9px;margin:3px 6px 3px 0;color:#444}}
+.chip.on{{border-color:#5c7cfa;color:#4c6ef5}} .ck{{font-weight:900;font-family:'Segoe UI Symbol',sans-serif}}</style></head><body>
+<div class="bar">Safe-B (샘플 화면·가상)</div><h2>특별작업허가 신청</h2>
 <table>
-<tr><th>작업명</th><td colspan="3">{f['작업명']}</td></tr>
-<tr><th>작업시작</th><td>{f['작업시작']}</td><th>작업종료</th><td>{f['작업종료']}</td></tr>
-<tr><th>사업구분</th><td>{f['사업구분']}</td><th>관리팀</th><td>{f['관리팀']}</td></tr>
-<tr><th>도급사</th><td colspan="3">{f['도급사']}</td></tr>
-<tr><th>작업장소 구분</th><td>{f['작업장소 구분']}</td><th>작업장소(사옥)</th><td>{f['작업장소(사옥)']}</td></tr>
-<tr><th>작업장소(세부)</th><td colspan="3">{f['작업장소(세부)']}</td></tr>
-<tr><th>High Risk</th><td>{radio(high_risk_no)}</td><th>긴급작업 여부</th><td>{radio(urgent_no)}</td></tr>
-<tr><th>작업구분</th><td colspan="3">{categories}</td></tr>
-<tr><th>작업내용</th><td colspan="3">{f['작업내용']}</td></tr>
-<tr><th>작업책임자</th><td>{f['작업책임자']}</td><th>작업인원</th><td>{f['작업인원']}</td></tr>
+<tr>{th('작업명', True)}<td>{f['작업명']}</td>{th('작업시작', True)}<td>{f['작업시작']}</td>{th('작업종료', True)}<td>{f['작업종료']}</td></tr>
+<tr>{th('사업구분')}<td>{f['사업구분']}</td>{th('관리팀')}<td>{f['관리팀']}</td>{th('도급사')}<td>{f['도급사']}</td></tr>
+<tr>{th('작업장소 구분')}<td>{place}</td>{th('작업장소(사옥)')}<td>{f['작업장소(사옥)']}</td>{th('작업장소(세부)')}<td>{f['작업장소(세부)']}</td></tr>
+<tr>{th('High Risk')}<td colspan="2">{radio(high_risk_no)}</td>{th('긴급작업 여부', True)}<td colspan="2">{radio(urgent_no)}</td></tr>
+<tr>{th('작업 구분', True)}<td colspan="5">{categories}</td></tr>
+<tr>{th('작업 내용')}<td colspan="5">{f['작업내용']}</td></tr>
+<tr>{th('작업 책임자', True)}<td colspan="3">{f['작업책임자']}</td>{th('작업인원', True)}<td>{f['작업인원']}</td></tr>
 </table>
+<h2>작업자</h2>
 <table><tr><th>순번</th><th>성명</th><th>직종</th></tr>
 {''.join(f'<tr><td>{i + 1}</td><td>{n}</td><td>통신공</td></tr>' for i, n in enumerate(workers))}
 </table></body></html>"""
@@ -196,7 +207,7 @@ th{{width:150px}}</style></head><body>
 
 # 장면 1의 Safe_B 화면: 관리팀은 일부러 비워 둔다
 PERMIT_SCREEN_HTML = permit_screen_html(
-    {'고소작업(3.5m 이상)', '고소작업대(차량형)'},
+    {'밀폐공간작업(맨홀 포함)', '3.5m이상 고소작업', '하역운반기계/중량물취급작업(고소작업대/차량형)'},
     {'작업명': '통신맨홀 내부 광케이블 접속 및 전주 인입선 정리 작업', '작업시작': '2026-11-10 09:00', '작업종료': '2026-11-10 18:00',
      '사업구분': '유선미디어', '관리팀': '', '도급사': '(가상) 한빛통신', '작업장소 구분': '옥외', '작업장소(사옥)': '○○사옥',
      '작업장소(세부)': '○○로 통신맨홀 M-123 및 인근 전주 #45', '작업내용': '맨홀 내부 광케이블 접속, 고소작업차로 전주 인입선 정리',
@@ -204,7 +215,7 @@ PERMIT_SCREEN_HTML = permit_screen_html(
     WORKERS)
 
 
-def html_to_png(html_text, png_name, size='1000,760'):
+def html_to_png(html_text, png_name, size='1880,760'):
     """Safe_b 화면 캡처를 흉내 낸 그림(글자 인식 시험용)."""
     chrome = next(p for p in CHROME_CANDIDATES if os.path.exists(p))
     work = tempfile.mkdtemp()

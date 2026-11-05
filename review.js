@@ -279,8 +279,8 @@ function joinSpacedSyllables(line) {
   return line.replace(/(?:^|(?<=\s))([가-힣])(?:\s([가-힣]))+(?=\s|$)/g, (match) => match.replace(/\s/g, ""));
 }
 
-// 화면 캡처는 글자가 작아(14px 안팎) 그대로는 한글을 거의 못 읽는다 → 2~3배 키우고 흑백으로 바꿔 인식한다
-const OCR_TARGET_WIDTH = 2400;
+// 화면 캡처는 글자가 작아(11~14px) 그대로는 한글을 거의 못 읽는다 → 2~3배 키우고 흑백으로 바꿔 인식한다
+const OCR_TARGET_WIDTH = 5600;
 
 async function prepareForOcr(file) {
   const bitmap = await createImageBitmap(file);
@@ -293,11 +293,35 @@ async function prepareForOcr(file) {
   context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   const px = image.data;
+  // Safe_B는 선택된 버튼을 파란 글자·테두리로 보여 주므로 흑백으로 바꾸기 전의 색을 남겨 둔다
+  const color = new Uint8ClampedArray(px);
   const { width, height } = canvas;
-  // 흑백 두 값으로 나눈다(true = 검은 점)
+  // 흑백 두 값으로 나눈다(1 = 검은 점). 입력 칸의 옅은 회색 글자·파란 글자도 살리도록,
+  // 고정 기준 대신 주변(창 크기 win) 평균 밝기보다 충분히 어두우면 글자로 본다(국소 문턱값)
+  // 밝기는 가장 어두운 색 성분으로 잰다: 파란 글자(선택된 버튼)도 검은 글자처럼 진하게 남는다
+  const lum = new Float32Array(width * height);
+  for (let i = 0, p = 0; i < px.length; i += 4, p += 1) lum[p] = Math.min(px[i], px[i + 1], px[i + 2]);
+  const integral = new Float64Array((width + 1) * (height + 1));
+  for (let y = 0; y < height; y += 1) {
+    let rowSum = 0;
+    for (let x = 0; x < width; x += 1) {
+      rowSum += lum[y * width + x];
+      integral[(y + 1) * (width + 1) + x + 1] = integral[y * (width + 1) + x + 1] + rowSum;
+    }
+  }
+  const win = Math.max(8, Math.round(12 * scale));
   const dark = new Uint8Array(width * height);
-  for (let i = 0, p = 0; i < px.length; i += 4, p += 1) {
-    dark[p] = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2] < 165 ? 1 : 0;
+  for (let y = 0; y < height; y += 1) {
+    const ya = Math.max(0, y - win);
+    const yb = Math.min(height, y + win + 1);
+    for (let x = 0; x < width; x += 1) {
+      const xa = Math.max(0, x - win);
+      const xb = Math.min(width, x + win + 1);
+      const sum = integral[yb * (width + 1) + xb] - integral[ya * (width + 1) + xb] - integral[yb * (width + 1) + xa] + integral[ya * (width + 1) + xa];
+      const mean = sum / ((yb - ya) * (xb - xa));
+      const v = lum[y * width + x];
+      dark[y * width + x] = v < 235 && v < mean * 0.86 ? 1 : 0;
+    }
   }
   // 표 테두리처럼 가로·세로로 길게 이어진 선은 지운다(남겨 두면 표 전체를 글자로 잘못 읽는다)
   const maxRun = Math.round(40 * scale);
@@ -324,14 +348,151 @@ async function prepareForOcr(file) {
       }
     }
   }
+  // 글자 인식에는 흑백 대신 부드러운 회색 그림을 준다(작고 굵은 글자가 흑백으로는 뭉개짐). 표 테두리 자리만 하얗게 지운다.
   for (let p = 0; p < dark.length; p += 1) {
+    const erased = erase[p] && dark[p];
     dark[p] = dark[p] && !erase[p] ? 1 : 0;
-    const value = dark[p] ? 0 : 255;
+    const value = erased ? 255 : Math.min(255, lum[p] * 1.08);
     px[p * 4] = px[p * 4 + 1] = px[p * 4 + 2] = value;
     px[p * 4 + 3] = 255;
   }
   context.putImageData(image, 0, 0);
-  return { canvas, dark, width, height };
+  return { canvas, dark, color, width, height, sourceWidth: bitmap.width };
+}
+
+// ── Safe_B 선택 버튼(칩) 찾기 ──
+// Safe_B의 예/아니오·작업구분은 '✓ 이름' 모양의 둥근 버튼이고, 고른 버튼만 파란 테두리·파란 글자다.
+// 안 고른 버튼은 테두리가 거의 보이지 않아, 넓은 빈칸으로 버튼을 나누고 글자가 파란지로 선택 여부를 정한다.
+// 고른 버튼은 테두리·글자가 파랗다(0.6 이상). 안 고른 버튼은 글자 색 번짐 정도(0.25 이하)라 0.4로 가른다.
+const CHIP_SELECTED_BLUE = 0.4;
+// 파란 점: 파랑이 빨강·초록보다 18 이상 높음(선택 버튼의 옅은 파란 글자·테두리까지 센다).
+// 검은 글자 가장자리의 색 번짐도 조금 섞이지만(0.2 안팎), 선택 버튼(0.6 이상)과는 CHIP_SELECTED_BLUE로 갈린다.
+const isBluish = (r, g, b) => b - Math.max(r, g) > 18;
+
+// 버튼 테두리 상자 찾기: 안 고른 버튼 테두리는 아주 옅은 회색(밝기 237~244)이라 247 미만을 '그려진 점'으로 본다.
+// 한 줄 띠에서 열마다 그려진 점이 있는지 보면 버튼 하나는 테두리 때문에 끊기지 않고 이어지고, 버튼 사이는 빈 열로 끊긴다.
+// 위·아래 테두리 줄이 있고 안이 대부분 비어 있는(바탕색 칸이 아닌) 구간만 버튼으로 본다.
+// centerY: 그 줄 글자의 세로 가운데, size: 화면 전체의 보통 한글 글자 높이
+// 버튼들의 위 테두리는 한 높이에 나란히 놓인 가로선이다. 글자 위쪽(글자 높이 0.55~1.6배)에서 가장 많이 그려진 줄을
+// 위 테두리 줄로 잡고, 그 줄을 따라 이어진 구간 하나하나를 버튼으로 본 뒤, 아래 테두리가 있는지 확인한다.
+function detectChipBoxes(image, centerY, size) {
+  const { color, width, height } = image;
+  const drawn = (x, y) => {
+    const i = (y * width + x) * 4;
+    return Math.min(color[i], color[i + 1], color[i + 2]) < 247;
+  };
+  // 그려진 점 수. 표의 칸 선(글자 높이 40배보다 길게 이어진 줄)은 버튼 테두리가 아니므로 0으로 본다
+  const rowCount = (y) => {
+    let n = 0;
+    let run = 0;
+    for (let x = 0; x < width; x += 1) {
+      if (drawn(x, y)) {
+        n += 1;
+        run += 1;
+        if (run > size * 40) return 0;
+      } else {
+        run = 0;
+      }
+    }
+    return n;
+  };
+  const bestRow = (from, to) => {
+    let best = -1;
+    let bestCount = 0;
+    for (let y = Math.max(0, Math.round(from)); y <= Math.min(height - 1, Math.round(to)); y += 1) {
+      const n = rowCount(y);
+      if (n > bestCount) {
+        best = y;
+        bestCount = n;
+      }
+    }
+    return best;
+  };
+  const top = bestRow(centerY - size * 1.6, centerY - size * 0.55);
+  const bottom = bestRow(centerY + size * 0.55, centerY + size * 1.6);
+  if (top < 0 || bottom < 0 || bottom - top < size * 1.2 || bottom - top > size * 2.8) return [];
+  // 위 테두리 줄(두께를 감안해 ±2줄)을 따라 이어진 구간 = 버튼 하나(작은 틈 2px까지는 이어진 것으로)
+  const onTop = (x) => {
+    for (let y = top - 2; y <= top + 2; y += 1) if (y >= 0 && y < height && drawn(x, y)) return true;
+    return false;
+  };
+  const segments = [];
+  let start = -1;
+  let lastOn = -1;
+  for (let x = 0; x <= width; x += 1) {
+    if (x < width && onTop(x)) {
+      if (start < 0) start = x;
+      lastOn = x;
+    } else if (start >= 0 && x - lastOn > 2) {
+      segments.push([start, lastOn]);
+      start = -1;
+    }
+  }
+  const coverage = (y, xa, xb) => {
+    let best = 0;
+    for (let yy = y - 2; yy <= y + 2; yy += 1) {
+      if (yy < 0 || yy >= height) continue;
+      let n = 0;
+      for (let x = xa; x <= xb; x += 1) n += drawn(x, yy) ? 1 : 0;
+      best = Math.max(best, n / (xb - xa + 1));
+    }
+    return best;
+  };
+  const boxes = [];
+  segments.forEach(([x0, x1]) => {
+    // 버튼 너비: 글자 높이 1.5배~40배(표 칸 선처럼 아주 긴 줄은 버튼이 아니다)
+    if (x1 - x0 < size * 1.5 || x1 - x0 > size * 40) return;
+    const ia = x0 + Math.round(size * 0.2);
+    const ib = x1 - Math.round(size * 0.2);
+    if (ib <= ia || coverage(bottom, ia, ib) < 0.8) return;
+    let inside = 0;
+    let insideTotal = 0;
+    let ink = 0;
+    let blue = 0;
+    for (let y = top; y <= bottom; y += 1) {
+      for (let x = x0; x <= x1; x += 1) {
+        const i = (y * width + x) * 4;
+        const r = color[i];
+        const g = color[i + 1];
+        const b = color[i + 2];
+        const isDrawn = Math.min(r, g, b) < 247;
+        if (y > top + 2 && y < bottom - 2 && x > x0 + 2 && x < x1 - 2) {
+          insideTotal += 1;
+          if (isDrawn) inside += 1;
+        }
+        if (isDrawn) {
+          ink += 1;
+          if (isBluish(r, g, b)) blue += 1;
+        }
+      }
+    }
+    if (insideTotal && inside / insideTotal > 0.5) return; // 바탕색이 칠해진 칸(항목 이름 칸 등)
+    boxes.push({ x0, x1, y0: top, y1: bottom, blue: ink ? blue / ink : 0 });
+  });
+  return boxes;
+}
+
+// 단어 글자 획 중 파란색 비율(0~1): Safe_B에서 선택된 버튼 글자는 파랗고, 선택 안 된 것은 회색·검정이다
+function blueRatio(image, bbox) {
+  const { color, width, height } = image;
+  const x0 = Math.max(0, Math.floor(bbox.x0));
+  const x1 = Math.min(width - 1, Math.ceil(bbox.x1));
+  const y0 = Math.max(0, Math.floor(bbox.y0));
+  const y1 = Math.min(height - 1, Math.ceil(bbox.y1));
+  let ink = 0;
+  let blue = 0;
+  for (let y = y0; y <= y1; y += 1) {
+    for (let x = x0; x <= x1; x += 1) {
+      const i = (y * width + x) * 4;
+      const r = color[i];
+      const g = color[i + 1];
+      const b = color[i + 2];
+      if (0.299 * r + 0.587 * g + 0.114 * b > 200) continue; // 바탕(흰색·옅은 파랑)
+      ink += 1;
+      if (isBluish(r, g, b)) blue += 1;
+    }
+  }
+  return ink ? blue / ink : 0;
 }
 
 // ── 그림 속 체크박스·라디오 버튼 ──
@@ -479,6 +640,89 @@ function inkDensity(image, wordBox, size, exact = false) {
   return ink / Math.max(1, (x1 - x0 + 1) * (y1 - y0 + 1));
 }
 
+// ── Safe_B 항목 이름 칸(옅은 파란 바탕) 찾기 ──
+// 화면 전체를 한 번에 읽으면 작고 굵은 항목 이름(관리팀·작업인원 등)을 자주 놓친다.
+// 항목 이름 칸과 그 오른쪽 값 칸을 따로 한 줄씩 읽으면 훨씬 정확하다.
+function findLabelCells(image, scale) {
+  const { color, width, height } = image;
+  // 칸 사이 1px 경계선을 건너뛰지 않도록 원래 화면의 1px 간격으로 본다(건너뛰면 위아래 칸이 한 칸으로 붙는다)
+  const step = Math.max(1, Math.floor(scale));
+  const gw = Math.floor(width / step);
+  const gh = Math.floor(height / step);
+  const isLabelBg = (x, y) => {
+    const i = (y * width + x) * 4;
+    const r = color[i];
+    const g = color[i + 1];
+    const b = color[i + 2];
+    // 일반 항목 칸 (239,242,255), 필수(*) 항목 칸 (221,228,254)
+    return b >= 248 && r >= 212 && r <= 246 && g >= 220 && g <= 249 && b - r >= 9;
+  };
+  const mask = new Uint8Array(gw * gh);
+  for (let gy = 0; gy < gh; gy += 1) for (let gx = 0; gx < gw; gx += 1) mask[gy * gw + gx] = isLabelBg(gx * step, gy * step) ? 1 : 0;
+  const seen = new Uint8Array(gw * gh);
+  const cells = [];
+  for (let start = 0; start < mask.length; start += 1) {
+    if (!mask[start] || seen[start]) continue;
+    let x0 = gw, x1 = 0, y0 = gh, y1 = 0, count = 0;
+    const stack = [start];
+    seen[start] = 1;
+    while (stack.length) {
+      const p = stack.pop();
+      const gx = p % gw;
+      const gy = (p - gx) / gw;
+      count += 1;
+      if (gx < x0) x0 = gx;
+      if (gx > x1) x1 = gx;
+      if (gy < y0) y0 = gy;
+      if (gy > y1) y1 = gy;
+      for (const q of [p - 1, p + 1, p - gw, p + gw]) {
+        if (q < 0 || q >= mask.length || seen[q] || !mask[q]) continue;
+        if (Math.abs((q % gw) - gx) > 1) continue;
+        seen[q] = 1;
+        stack.push(q);
+      }
+    }
+    const w = (x1 - x0 + 1) * step;
+    const h = (y1 - y0 + 1) * step;
+    // 항목 이름 칸 크기(원래 화면 기준 가로 60px·세로 18px 이상), 대부분이 바탕색
+    if (w < 60 * scale || h < 18 * scale || w > width * 0.4 || count / ((x1 - x0 + 1) * (y1 - y0 + 1)) < 0.6) continue;
+    cells.push({ x0: x0 * step, x1: (x1 + 1) * step, y0: y0 * step, y1: (y1 + 1) * step });
+  }
+  return cells.sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0);
+}
+
+async function readLabelCells(worker, image, scale) {
+  const cells = findLabelCells(image, scale);
+  const pad = Math.round(4 * scale);
+  const result = [];
+  const read = async (box, psm) => {
+    await worker.setParameters({ tessedit_pageseg_mode: psm });
+    const { data } = await worker.recognize(image.canvas, {
+      rectangle: { left: Math.round(box.x0), top: Math.round(box.y0), width: Math.round(box.x1 - box.x0), height: Math.round(box.y1 - box.y0) },
+    });
+    return data.text.replace(/\s+/g, " ").trim();
+  };
+  try {
+    for (const cell of cells) {
+      // 같은 줄(세로로 절반 이상 겹침)에서 오른쪽으로 가장 가까운 다음 항목 이름 칸 전까지가 값 칸
+      const next = cells
+        .filter((c) => c !== cell && c.x0 > cell.x1 && Math.min(c.y1, cell.y1) - Math.max(c.y0, cell.y0) > (cell.y1 - cell.y0) * 0.5)
+        .sort((a, b) => a.x0 - b.x0)[0];
+      const valueBox = { x0: cell.x1 + pad, x1: (next ? next.x0 : image.width) - pad, y0: cell.y0 + pad, y1: cell.y1 - pad };
+      if (valueBox.x1 - valueBox.x0 < 10 * scale) continue;
+      const labelBox = { x0: cell.x0 + pad, x1: cell.x1 - pad, y0: cell.y0 + pad, y1: cell.y1 - pad };
+      // 한 줄로 못 읽으면(빈 글자) 덩어리 글로 한 번 더
+      let label = await read(labelBox, "7");
+      if (!/[가-힣A-Za-z]{2,}/.test(label)) label = await read(labelBox, "6");
+      const value = await read(valueBox, "6");
+      result.push({ label, value });
+    }
+  } finally {
+    await worker.setParameters({ tessedit_pageseg_mode: "6" }); // tesseract.js 기본값(한 덩어리 글)으로 되돌린다
+  }
+  return result;
+}
+
 async function ocrImage(file, onProgress) {
   ocrProgress = onProgress;
   try {
@@ -487,6 +731,8 @@ async function ocrImage(file, onProgress) {
     const { data } = await worker.recognize(image.canvas, {}, { blocks: true, text: true });
     const lines = [];
     const options = [];
+    const wordColors = [];
+    const records = [];
     (data.blocks || []).forEach((block) => block.paragraphs.forEach((paragraph) => paragraph.lines.forEach((ocrLine) => {
       const words = ocrLine.words.filter((w) => w.text.trim());
       if (!words.length) return;
@@ -504,6 +750,56 @@ async function ocrImage(file, onProgress) {
       // 이 줄의 보통 글자 높이(표시 단어는 상자가 길쭉하게 나와 빼고 잰다)
       const textHeights = words.filter((w) => !MARKER_WORD.test(w.text.trim())).map((w) => w.bbox.y1 - w.bbox.y0).sort((a, b) => a - b);
       const size = textHeights.length ? textHeights[Math.floor(textHeights.length / 2)] : 30;
+      words.forEach((word) => { word.blue = blueRatio(image, word.bbox); });
+      records.push({ text, words, size, ocrLine });
+    })));
+
+    // Safe_B 버튼(칩): 테두리 상자로 찾는다(글자 인식이 ✓·버튼 이름을 엉뚱하게 읽어도 상자는 정확하다)
+    // 글자 높이는 화면 전체의 한글 단어(두 글자 이상)로 잰다(줄마다 재면 들쭉날쭉하다)
+    const median = (values) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+    const hangulWords = records.flatMap((r) => r.words.filter((w) => /[가-힣]{2,}/.test(w.text)));
+    const pageTextHeight = hangulWords.length ? median(hangulWords.map((w) => w.bbox.y1 - w.bbox.y0)) : 30;
+    records.forEach((record) => {
+      const centers = record.words.filter((w) => /[가-힣A-Za-z0-9]{2,}/.test(w.text)).map((w) => (w.bbox.y0 + w.bbox.y1) / 2);
+      const centerY = centers.length ? median(centers) : (record.ocrLine.bbox.y0 + record.ocrLine.bbox.y1) / 2;
+      record.chipBoxes = detectChipBoxes(image, centerY, pageTextHeight);
+    });
+
+    // 한 줄 안에 파란 버튼과 파랗지 않은 버튼이 같이 있으면 Safe_B 버튼 화면으로 본다(선택 = 파란 테두리·글자)
+    const chipStyle = records.some((r) => r.chipBoxes.some((b) => b.blue >= CHIP_SELECTED_BLUE)
+      && r.chipBoxes.some((b) => b.blue < 0.25));
+
+    records.forEach(({ text, words, size, ocrLine, chipBoxes }) => {
+      words.forEach((word) => wordColors.push({
+        lineText: text, start: word.offset, end: word.offset + word.text.trim().length, blue: Math.round(word.blue * 100) / 100,
+      }));
+      lines.push(text);
+      if (chipStyle && chipBoxes.length) {
+        chipBoxes.forEach((box) => {
+          const inside = words.filter((w) => {
+            const cx = (w.bbox.x0 + w.bbox.x1) / 2;
+            return cx > box.x0 && cx < box.x1;
+          }).sort((a, b) => a.offset - b.offset);
+          // 버튼 안 글자를 못 읽었으면, 버튼 바로 오른쪽 단어 위치를 기준으로 삼는다(예/아니오 구간 판단용)
+          const anchor = inside[0] || [...words].sort((a, b) => a.bbox.x0 - b.bbox.x0).find((w) => w.bbox.x0 >= box.x0);
+          const last = inside[inside.length - 1];
+          options.push({
+            text: inside.length ? text.slice(inside[0].offset, last.offset + last.text.trim().length).replace(/^[vV✓✔+=|ㅜㅠ~＊*<«,"'。ㆍ[`^\s]+/, "") : "",
+            textIndex: anchor ? anchor.offset : text.length,
+            x: box.x0,
+            density: null,
+            filled: box.blue >= CHIP_SELECTED_BLUE,
+            blue: Math.round(box.blue * 100) / 100,
+            chip: true,
+            check: true,
+            lineText: text,
+            page: 0,
+          });
+        });
+        return;
+      }
+      const markerIndexes = words.map((w, i) => (MARKER_WORD.test(w.text.trim()) ? i : -1)).filter((i) => i >= 0);
+
       // 표시 위치: 표시로 읽힌 단어의 실제 테두리 + 단어로 잡히지 않은 표시(겹치면 하나로)
       const overlaps = (a, b) => a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0;
       const markers = markerIndexes.map((i) => markerOutline(image, words[i].bbox, size));
@@ -527,9 +823,10 @@ async function ocrImage(file, onProgress) {
           page: 0,
         });
       });
-      lines.push(text);
-    })));
-    return { lines: lines.filter(Boolean), options };
+    });
+    // Safe_B 화면이면 항목 이름 칸·값 칸을 한 칸씩 다시 읽는다
+    const formCells = chipStyle ? await readLabelCells(worker, image, image.width / (image.sourceWidth || image.width)) : [];
+    return { lines: lines.filter(Boolean), options, wordColors, chipStyle, formCells };
   } finally {
     ocrProgress = null;
   }
@@ -575,6 +872,8 @@ async function readDocument(file, options = {}) {
         const ocr = await ocrImage(file, options.onProgress);
         part.lines = ocr.lines;
         part.options = ocr.options;
+        part.wordColors = ocr.wordColors;
+        part.formCells = ocr.formCells;
         part.ocr = true;
       } catch (error) {
         throw new Error(location.protocol === "file:"
@@ -746,7 +1045,8 @@ function analyzeDocument(kind, parts) {
   const files = parts.map(analyzePart);
   const lines = files.flatMap((f) => f.lines);
   const doc = analyzePart({ lines, pages: files.flatMap((f) => f.pages), tables: files.flatMap((f) => f.tables),
-    images: files.reduce((sum, f) => sum + f.images, 0), options: files.flatMap((f) => f.options || []) });
+    images: files.reduce((sum, f) => sum + f.images, 0), options: files.flatMap((f) => f.options || []),
+    wordColors: files.flatMap((f) => f.wordColors || []), formCells: files.flatMap((f) => f.formCells || []) });
   return { ...doc, kind, files };
 }
 

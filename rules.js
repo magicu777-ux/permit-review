@@ -142,7 +142,7 @@ window.PERMIT_RULES = {
       { name: "사업구분", label: "사업\\s*구\\s*분" },
       { name: "관리팀", label: "관리\\s*팀" },
       { name: "도급사", label: "도급\\s*사" },
-      { name: "작업장소 구분", label: "작업\\s*장소\\s*구\\s*분" },
+      { name: "작업장소 구분", label: "작업\\s*장소\\s*구\\s*분", choice: true },
       { name: "작업장소(사옥)", label: "작업\\s*장소\\s*[(（]\\s*사\\s*옥\\s*[)）」]?" },
       { name: "작업장소(세부)", label: "작업\\s*장소\\s*[(（]\\s*세\\s*부\\s*[)）」]?" },
       { name: "작업내용", label: "작업\\s*내\\s*용" },
@@ -150,37 +150,44 @@ window.PERMIT_RULES = {
       { name: "작업인원", label: "작업\\s*인\\s*원" },
     ],
     // 입력된 것으로 보지 않는 값
-    placeholders: ["선택", "선택하세요", "선택해주세요", "입력", "미입력", "없음"],
+    placeholders: ["선택", "선택하세요", "선택해주세요", "입력", "입력하세요", "미입력", "없음", "검색"],
     // '아니오'로 선택되어 있어야 하는 예/아니오 항목
     mustBeNo: [
       { name: "High Risk", label: "High\\s*Risk|하이\\s*리스크" },
       { name: "긴급작업 여부", label: "긴급\\s*작업(?:\\s*여\\s*부)?" },
     ],
     categoryLabel: "작업\\s*구\\s*분",
-    // 작업구분 선택지 → 함께 있어야 하는 서류
+    // Safe_B '작업개요' 항목 이름 칸의 화면 순서(이름을 못 읽은 칸을 앞뒤 칸으로 알아내는 데 씀)
+    cellOrder: ["작업명", "작업시작", "작업종료", "사업구분", "관리팀", "도급사", "협력사", "작업장소 구분", "작업장소(사옥)",
+      "작업장소(세부)", "High Risk", "긴급작업 여부", "작업구분", "작업내용", "작업책임자", "작업인원"],
+    otherLabels: [{ name: "협력사", label: "협\\s*력\\s*사" }],
+    // 작업구분 선택지 → 함께 있어야 하는 서류. 순서는 Safe_B 화면의 버튼 순서와 같아야 한다
+    // (글자 인식이 버튼 이름을 못 읽어도 순서로 어느 버튼인지 알아낸다).
     //   education: 특별교육 일지에 이 말이 있어야 함 / planTitle: 이 제목의 작업계획서가 있어야 함
     //   handlingPage1: 차량계 하역운반기계 작업계획서 1쪽에서 이 장비가 체크되어 있어야 함
     categories: [
+      { id: "confined", name: "밀폐공간작업(맨홀 포함)", match: "밀폐", workTypes: ["confined"], requires: [] },
       { id: "hot", name: "화기작업", match: "화기", workTypes: ["hot"],
         requires: [{ doc: "education", keywords: ["화기", "용접", "용단", "화재\\s*위험"], label: "특별안전교육(화기·용접)" }] },
-      { id: "height35", name: "고소작업(3.5m 이상)", match: "^고소작업(?!대|차)", workTypes: ["height"], requires: [] },
-      { id: "scaffoldInstall", name: "가시설물 설치", match: "설치", workTypes: ["scaffold"],
-        requires: [{ doc: "education", keywords: ["달비계"], label: "특별안전교육(달비계)" }] },
-      { id: "scaffoldRemove", name: "가시설물 해체", match: "해체", workTypes: ["scaffold"],
-        requires: [{ doc: "education", keywords: ["비계"], label: "특별안전교육(비계)" }] },
+      { id: "height35", name: "3.5m이상 고소작업", match: "3\\.?5m?이상|^고소작업(?!대|차)", workTypes: ["height"], requires: [] },
+      // 설치는 달비계, 해체는 비계 특별교육(Safe_B에서는 한 버튼이라 둘 중 하나가 있으면 된다)
+      { id: "scaffold", name: "가시설물 설치/해체작업", match: "가시설물|설치|해체", workTypes: ["scaffold"],
+        requires: [{ doc: "education", keywords: ["비계"], label: "특별안전교육(설치: 달비계 / 해체: 비계)" }] },
+      { id: "road", name: "도로점용작업", match: "도로", workTypes: [], requires: [] },
       { id: "electric", name: "전기작업", match: "전기", workTypes: ["electric"],
         requires: [{ doc: "planTitle", keywords: ["전기\\s*작업\\s*계획서"], label: "전기작업 계획서" }] },
-      { id: "dump", name: "건설기계(덤프트럭)", match: "덤프", workTypes: ["constructionMachine"],
+      { id: "excavation", name: "굴착작업", match: "굴착작업|굴삭작업", workTypes: ["excavation"], requires: [] },
+      { id: "dump", name: "건설기계작업(덤프트럭)", match: "덤프", workTypes: ["constructionMachine"],
         requires: [{ doc: "handlingPage1", keywords: ["덤프"], label: "차량계 하역운반기계 작업계획서 1쪽 「덤프트럭」 체크" }] },
-      { id: "excavator", name: "건설기계(굴착기)", match: "굴착기|굴삭기", workTypes: ["constructionMachine"],
+      { id: "excavator", name: "건설기계작업(굴착기)", match: "굴착기|굴삭기", workTypes: ["constructionMachine"],
         requires: [{ doc: "planTitle", keywords: ["차량계\\s*건설\\s*기계"], label: "차량계 건설기계 작업계획서" }] },
-      { id: "aerialVehicle", name: "고소작업대(차량형)", match: "차량형", workTypes: ["handlingMachine", "height"],
+      { id: "aerialVehicle", name: "하역운반기계/중량물취급작업(고소작업대/차량형)", match: "차량형", workTypes: ["handlingMachine", "height"],
         requires: [{ doc: "handlingPage1", keywords: ["고소\\s*작업\\s*차", "스카이"], label: "차량계 하역운반기계 작업계획서 1쪽 「고소작업차·스카이 차량 작업」 체크" }] },
-      { id: "aerialScissor", name: "고소작업대(시저형)", match: "시저형", workTypes: ["handlingMachine", "height"],
+      { id: "aerialScissor", name: "하역운반기계/중량물취급작업(고소작업대/시저형)", match: "시저형", workTypes: ["handlingMachine", "height"],
         requires: [{ doc: "handlingPage1", keywords: ["고소\\s*작업\\s*대", "리프트\\s*카"], label: "차량계 하역운반기계 작업계획서 1쪽 「고소작업대·리프트카 작업」 체크" }] },
-      { id: "crane", name: "이동식 크레인", match: "크레인", workTypes: ["handlingMachine", "crane"],
+      { id: "crane", name: "하역운반기계/중량물취급작업(이동식크레인)", match: "크레인", workTypes: ["handlingMachine", "crane"],
         requires: [{ doc: "handlingPage1", keywords: ["크레인"], label: "차량계 하역운반기계 작업계획서 1쪽 「크레인 작업」 체크" }] },
-      { id: "forklift", name: "지게차", match: "지게차", workTypes: ["handlingMachine"],
+      { id: "forklift", name: "하역운반기계/중량물취급작업(지게차)", match: "지게차", workTypes: ["handlingMachine"],
         requires: [{ doc: "handlingPage1", keywords: ["지게차"], label: "차량계 하역운반기계 작업계획서 1쪽 「지게차 작업」 체크" }] },
     ],
     handlingPlanTitle: ["차량계\\s*하역\\s*운반\\s*기계"],
