@@ -46,6 +46,13 @@ body {
 h1 { margin: 4px 0 6px; font-size: 26px; }
 .lead { margin: 0; opacity: 0.9; }
 
+/* 상단 바로가기: 법규 이력관리 ↔ 작업계획서 점검 */
+.quick-links { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; margin-bottom: 10px; font-size: 13px; }
+.quick-links-label { opacity: 0.8; margin-right: 2px; }
+.quick-links a { color: #fff; text-decoration: none; padding: 4px 12px; border: 1px solid rgba(255,255,255,0.45); border-radius: 999px; background: rgba(255,255,255,0.08); white-space: nowrap; }
+.quick-links a:hover, .quick-links a:focus-visible { background: rgba(255,255,255,0.22); }
+.quick-links a[aria-current="page"] { background: #fff; color: var(--brand); font-weight: 600; }
+
 main { padding: 16px; }
 
 .privacy {
@@ -229,6 +236,7 @@ table.result col.c-title { width: 32%; }
 @media print {
   body { background: #fff; }
   .top { background: none; color: var(--ink); padding: 0 0 8px; }
+  .quick-links { display: none !important; }
   .privacy, #slots, .actions, .result-actions, .panel:first-of-type { display: none !important; }
   .panel { border: 0; padding: 0; }
   .extracted { display: none; }
